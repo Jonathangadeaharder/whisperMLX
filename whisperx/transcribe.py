@@ -4,7 +4,6 @@ import os
 import warnings
 
 import numpy as np
-import torch
 
 from whisperx.alignment import align, load_align_model
 from whisperx.asr import load_model
@@ -91,10 +90,8 @@ def transcribe_task(args: dict, parser: argparse.ArgumentParser):
     else:
         temperature = [temperature]
 
-    faster_whisper_threads = 4
-    if (threads := args.pop("threads")) > 0:
-        torch.set_num_threads(threads)
-        faster_whisper_threads = threads
+    # --threads is accepted for CLI compatibility but mlx-whisper ignores it.
+    args.pop("threads")
 
     asr_options = {
         "beam_size": args.pop("beam_size"),
@@ -140,7 +137,6 @@ def transcribe_task(args: dict, parser: argparse.ArgumentParser):
         },
         task=task,
         local_files_only=model_cache_only,
-        threads=faster_whisper_threads,
         use_auth_token=hf_token,
     )
 
@@ -160,7 +156,6 @@ def transcribe_task(args: dict, parser: argparse.ArgumentParser):
     # Unload Whisper and VAD
     del model
     gc.collect()
-    torch.cuda.empty_cache()
 
     # Part 2: Align Loop
     if not no_align:
@@ -203,7 +198,6 @@ def transcribe_task(args: dict, parser: argparse.ArgumentParser):
         # Unload align model
         del align_model
         gc.collect()
-        torch.cuda.empty_cache()
 
     # >> Diarize
     if diarize:
