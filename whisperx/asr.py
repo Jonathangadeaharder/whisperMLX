@@ -3,7 +3,6 @@ from typing import List, Optional, Union
 
 import mlx_whisper
 import numpy as np
-import torch
 from transformers import WhisperTokenizer
 
 from whisperx.audio import SAMPLE_RATE, load_audio
@@ -306,11 +305,8 @@ def load_model(
     elif vad_method == "silero":
         vad_model = Silero(**default_vad_options)
     elif vad_method == "pyannote":
-        # mlx-whisper ignores device; pyannote VAD runs on torch (CPU on Apple
-        # Silicon for now).
-        device_vad = "cpu"
+        # MLX segmentation runs on Apple Silicon GPU; no torch device needed.
         vad_model = Pyannote(
-            torch.device(device_vad),
             token=use_auth_token,
             **default_vad_options,
         )
