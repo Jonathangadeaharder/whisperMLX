@@ -1,14 +1,13 @@
-import os
-from typing import List, Optional, Union
+from typing import Any
 
 import mlx_whisper
 import numpy as np
 from transformers import WhisperTokenizer
 
 from whisperx.audio import SAMPLE_RATE, load_audio
-from whisperx.schema import SingleSegment, TranscriptionResult, ProgressCallback
-from whisperx.vads import Vad, Silero, Pyannote
 from whisperx.log_utils import get_logger
+from whisperx.schema import ProgressCallback, SingleSegment, TranscriptionResult
+from whisperx.vads import Pyannote, Silero, Vad
 
 logger = get_logger(__name__)
 
@@ -27,9 +26,9 @@ def _resolve_model_path(whisper_arch: str) -> str:
     return _MLX_COMMUNITY + whisper_arch
 
 
-def find_numeral_symbol_tokens(tokenizer) -> List[int]:
+def find_numeral_symbol_tokens(tokenizer) -> list[int]:
     """Token ids whose decoded string contains a numeral or currency symbol."""
-    numeral_symbol_tokens: List[int] = []
+    numeral_symbol_tokens: list[int] = []
     eot = getattr(tokenizer, "eot", None)
     if eot is None:
         eot = tokenizer.vocab_size
@@ -54,9 +53,9 @@ class MlxWhisperPipeline:
         vad,
         vad_params: dict,
         mlx_options: dict,
-        language: Optional[str] = None,
+        language: str | None = None,
         suppress_numerals: bool = False,
-        suppress_tokens: Optional[List[int]] = None,
+        suppress_tokens: list[int] | None = None,
     ):
         self.model_path = model_path
         self.vad_model = vad
@@ -66,13 +65,13 @@ class MlxWhisperPipeline:
         self.suppress_numerals = suppress_numerals
         self.suppress_tokens = suppress_tokens
 
-    def transcribe(
+    def transcribe(  # noqa: PLR0912 - VAD + per-segment loop, split hurts flow
         self,
-        audio: Union[str, np.ndarray],
-        batch_size: Optional[int] = None,
+        audio: str | np.ndarray,
+        batch_size: int | None = None,
         num_workers: int = 0,
-        language: Optional[str] = None,
-        task: Optional[str] = None,
+        language: str | None = None,
+        task: str | None = None,
         chunk_size: int = 30,
         print_progress: bool = False,
         combined_progress: bool = False,
@@ -100,7 +99,7 @@ class MlxWhisperPipeline:
             merge_chunks = Pyannote.merge_chunks
 
         vad_segments = self.vad_model({"waveform": waveform, "sample_rate": SAMPLE_RATE})
-        vad_segments = merge_chunks(
+        vad_segments: list[dict[str, Any]] = merge_chunks(
             vad_segments,
             chunk_size,
             onset=self._vad_params["vad_onset"],
@@ -110,11 +109,13 @@ class MlxWhisperPipeline:
         language = language or self.preset_language
         task = task or "transcribe"
 
-        segments: List[SingleSegment] = []
+        segments: list[SingleSegment] = []
         total_segments = len(vad_segments)
         for idx, seg in enumerate(vad_segments):
-            f1 = int(seg["start"] * SAMPLE_RATE)
-            f2 = int(seg["end"] * SAMPLE_RATE)
+            seg_start = float(seg["start"])
+            seg_end = float(seg["end"])
+            f1 = int(seg_start * SAMPLE_RATE)
+            f2 = int(seg_end * SAMPLE_RATE)
             audio_slice = audio[f1:f2]
 
             seg_kwargs = dict(self._mlx_options)
@@ -134,30 +135,28 @@ class MlxWhisperPipeline:
                 if language is not None and self.preset_language is None:
                     logger.info("Detected language: %s", language)
 
-            seg_offset = seg["start"]
+            seg_offset = seg_start
             for sub in result.get("segments", []):
-                text = sub.get("text", "").strip()
+                text = str(sub.get("text", "")).strip()
                 if not text:
                     continue
+                sub_start = float(sub.get("start", 0.0))
+                sub_end = float(sub.get("end", 0.0))
+                avg_logprob = sub.get("avg_logprob")
                 segments.append(
                     {
                         "text": text,
-                        "start": round(seg_offset + sub.get("start", 0.0), 3),
-                        "end": round(seg_offset + sub.get("end", 0.0), 3),
-                        "avg_logprob": sub.get("avg_logprob"),
+                        "start": round(seg_offset + sub_start, 3),
+                        "end": round(seg_offset + sub_end, 3),
+                        "avg_logprob": float(avg_logprob) if avg_logprob is not None else None,
                     }
                 )
                 if verbose:
-                    print(
-                        f"Transcript: [{segments[-1]['start']} --> "
-                        f"{segments[-1]['end']}] {text}"
-                    )
+                    print(f"Transcript: [{segments[-1]['start']} --> {segments[-1]['end']}] {text}")
 
             if print_progress:
                 base_progress = ((idx + 1) / total_segments) * 100
-                percent_complete = (
-                    base_progress / 2 if combined_progress else base_progress
-                )
+                percent_complete = base_progress / 2 if combined_progress else base_progress
                 print(f"Progress: {percent_complete:.2f}%...")
             if progress_callback is not None:
                 progress_callback(((idx + 1) / total_segments) * 100)
@@ -168,19 +167,19 @@ class MlxWhisperPipeline:
 def load_model(
     whisper_arch: str,
     device: str,
-    device_index: int = 0,
+    device_index: int = 0,  # noqa: ARG001 - kept for whisperX API conformance
     compute_type: str = "default",
-    asr_options: Optional[dict] = None,
-    language: Optional[str] = None,
-    vad_model: Optional[Vad] = None,
-    vad_method: Optional[str] = "pyannote",
-    vad_options: Optional[dict] = None,
-    model: Optional[object] = None,
-    task: str = "transcribe",
-    download_root: Optional[str] = None,
-    local_files_only: bool = False,
-    threads: int = 4,
-    use_auth_token: Optional[Union[str, bool]] = None,
+    asr_options: dict | None = None,
+    language: str | None = None,
+    vad_model: Vad | None = None,
+    vad_method: str | None = "pyannote",
+    vad_options: dict | None = None,
+    model: object | None = None,  # noqa: ARG001 - kept for whisperX API conformance
+    task: str = "transcribe",  # noqa: ARG001 - kept for whisperX API conformance
+    download_root: str | None = None,  # noqa: ARG001 - kept for whisperX API conformance
+    local_files_only: bool = False,  # noqa: ARG001 - kept for whisperX API conformance
+    threads: int = 4,  # noqa: ARG001 - kept for whisperX API conformance
+    use_auth_token: str | bool | None = None,
 ) -> MlxWhisperPipeline:
     """Load a Whisper model for inference via mlx-whisper.
 
@@ -220,7 +219,7 @@ def load_model(
 
     model_path = _resolve_model_path(whisper_arch)
 
-    default_asr_options = {
+    default_asr_options: dict[str, Any] = {
         "beam_size": 5,
         "best_of": 5,
         "patience": 1,
@@ -263,14 +262,10 @@ def load_model(
 
     mlx_options = {
         "temperature": temperature,
-        "compression_ratio_threshold": default_asr_options.get(
-            "compression_ratio_threshold"
-        ),
+        "compression_ratio_threshold": default_asr_options.get("compression_ratio_threshold"),
         "logprob_threshold": default_asr_options.get("log_prob_threshold"),
         "no_speech_threshold": default_asr_options.get("no_speech_threshold"),
-        "condition_on_previous_text": default_asr_options.get(
-            "condition_on_previous_text"
-        ),
+        "condition_on_previous_text": default_asr_options.get("condition_on_previous_text"),
         "initial_prompt": default_asr_options.get("initial_prompt"),
         "word_timestamps": default_asr_options.get("word_timestamps"),
         "prepend_punctuations": default_asr_options.get("prepend_punctuations"),

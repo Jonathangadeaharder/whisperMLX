@@ -16,16 +16,19 @@ dependencies = [
     "pandas>=2.2.3",
     "huggingface-hub>=0.28.1",
     "scikit-learn>=1.7.0",
-    # torch stays: alignment.py runs wav2vec2 (transformers) inference on
-    # torch. VAD, ASR, and diarization are all MLX; only forced alignment
-    # still touches torch.
     "torch>=2.6.0",
     "transformers>=4.48.0",
 ]
 
 
 [project.optional-dependencies]
-dev = ["pytest"]
+dev = [
+    "mutmut>=3.6.0",
+    "pyrefly>=1.1.1",
+    "pytest>=9.0.2",
+    "pytest-cov>=7.1.0",
+    "ruff>=0.15.22",
+]
 
 [project.scripts]
 whispermlx = "whisperx.__main__:cli"
@@ -39,3 +42,106 @@ include-package-data = true
 [tool.setuptools.packages.find]
 where = ["."]
 include = ["whisperx*"]
+
+[dependency-groups]
+dev = [
+    "mutmut>=3.6.0",
+    "pyrefly>=1.1.1",
+    "pytest>=9.0.2",
+    "pytest-cov>=7.1.0",
+    "ruff>=0.15.22",
+]
+
+[tool.ruff]
+target-version = "py310"
+line-length = 100
+src = ["whisperx", "tests"]
+extend-exclude = ["whispermlx.egg-info", ".venv", "build", "dist"]
+
+[tool.ruff.lint]
+select = [
+    "E",    # pycodestyle errors
+    "W",    # pycodestyle warnings
+    "F",    # pyflakes
+    "I",    # isort
+    "B",    # bugbear
+    "C4",   # comprehensions
+    "UP",   # pyupgrade
+    "N",    # pep8-naming
+    "SIM",  # simplify
+    "RUF",  # ruff-specific
+    "PIE",  # flake8-pie
+    "RET",  # flake8-return
+    "ARG",  # flake8-unused-arguments
+    "PL",   # pylint
+]
+ignore = [
+    "E501",   # line too long (formatter handles)
+    "PLR0913", # too many args (whisper API is wide)
+    "PLR2004", # magic values (fixture data)
+    "B008",    # function call in default arg (torch/transformers pattern)
+]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/*" = ["ARG", "PLR2004", "S101"]
+# These files hold legitimate localization data (Cyrillic, Greek, Hebrew,
+# fullwidth punctuation). Suppress the ambiguous-unicode false positives.
+"whisperx/alignment.py" = ["RUF001"]
+"whisperx/asr.py" = ["RUF001"]
+"whisperx/conjunctions.py" = ["RUF001", "RUF002"]
+
+[tool.ruff.format]
+quote-style = "double"
+indent-style = "space"
+
+[tool.pyrefly]
+project_excludes = [
+    "**/.venv/**",
+    "**/build/**",
+    "**/dist/**",
+    "**/whispermlx.egg-info/**",
+]
+
+[tool.pyrefly.report]
+report_any = "warn"
+report_unbound_name = "error"
+report_missing_import = "error"
+report_private_import = "warn"
+report_undefined_attr = "warn"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "--strict-markers --strict-config"
+filterwarnings = ["error"]
+
+[tool.coverage.run]
+source = ["whisperx"]
+branch = true
+omit = [
+    "whisperx/__main__.py",
+    "whisperx/mlx_models/__init__.py",
+]
+
+[tool.coverage.report]
+exclude_lines = [
+    "pragma: no cover",
+    "raise NotImplementedError",
+    "if __name__ == .__main__.:",
+    "if TYPE_CHECKING:",
+]
+fail_under = 90
+show_missing = true
+skip_covered = false
+
+[tool.coverage.paths]
+source = ["whisperx/"]
+
+[tool.mutmut]
+paths_to_mutate = ["whisperx"]
+tests_dir = ["tests"]
+do_not_mutate = [
+    "whisperx/__main__.py",
+    "whisperx/mlx_models/__init__.py",
+]
+runner = "uv run pytest -x -q --no-cov"
+minimum_mutation_score = 80

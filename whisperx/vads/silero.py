@@ -1,10 +1,8 @@
-from typing import Optional
-
-import mlx.core as mx
+import mlx.core as mx  # pyrefly: ignore[missing-import]
 
 from whisperx.diarize import Segment as SegmentX
-from whisperx.vads.vad import Vad
 from whisperx.log_utils import get_logger
+from whisperx.vads.vad import Vad
 
 logger = get_logger(__name__)
 
@@ -12,15 +10,16 @@ logger = get_logger(__name__)
 class Silero(Vad):
     def __init__(self, **kwargs):
         logger.info("Performing voice activity detection using Silero (MLX)...")
-        super().__init__(kwargs['vad_onset'])
+        super().__init__(kwargs["vad_onset"])
 
-        self.vad_onset = kwargs['vad_onset']
-        self.chunk_size = kwargs['chunk_size']
+        self.vad_onset = kwargs["vad_onset"]
+        self.chunk_size = kwargs["chunk_size"]
         # Import here so weights load lazily on first use, not at import time.
-        from whisperx.mlx_models.silero_vad import detect_speech
+        from whisperx.mlx_models.silero_vad import detect_speech  # noqa: PLC0415
+
         self._detect_speech = detect_speech
 
-    def __call__(self, audio, **kwargs):
+    def __call__(self, audio, **kwargs):  # noqa: ARG002 - Vad interface conformance
         """Use Silero (MLX) to get segments of speech."""
         sample_rate = audio["sample_rate"]
         if sample_rate != 16000:
@@ -39,20 +38,17 @@ class Silero(Vad):
             chunk_size=512,
             max_speech_duration_s=self.chunk_size,
         )
-        return [
-            SegmentX(s / sample_rate, e / sample_rate, "UNKNOWN")
-            for s, e in raw_segments
-        ]
+        return [SegmentX(s / sample_rate, e / sample_rate, "UNKNOWN") for s, e in raw_segments]
 
     @staticmethod
     def preprocess_audio(audio):
         return audio
 
     @staticmethod
-    def merge_chunks(segments_list, chunk_size, onset=0.5, offset: Optional[float] = None):
+    def merge_chunks(segments, chunk_size, onset=0.5, offset: float | None = None):
         assert chunk_size > 0
-        if len(segments_list) == 0:
+        if len(segments) == 0:
             logger.warning("No active speech found in audio")
             return []
-        assert segments_list, "segments_list is empty."
-        return Vad.merge_chunks(segments_list, chunk_size, onset, offset)
+        assert segments, "segments is empty."
+        return Vad.merge_chunks(segments, chunk_size, onset, offset)

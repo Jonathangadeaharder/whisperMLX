@@ -2,12 +2,11 @@ import argparse
 import importlib.metadata
 import platform
 
-from whisperx.utils import (LANGUAGES, TO_LANGUAGE_CODE, optional_float,
-                            optional_int, str2bool)
 from whisperx.log_utils import setup_logging
+from whisperx.utils import LANGUAGES, TO_LANGUAGE_CODE, optional_float, optional_int, str2bool
 
 
-def cli():
+def cli():  # noqa: PLR0915 - argparse spec, one statement per flag
     # fmt: off
     parser = argparse.ArgumentParser(formatter_class=argparse.ArgumentDefaultsHelpFormatter)
     parser.add_argument("audio", nargs="+", type=str, help="audio file(s) to transcribe")
@@ -25,7 +24,7 @@ def cli():
     parser.add_argument("--log-level", type=str, default=None, choices=["debug", "info", "warning", "error", "critical"], help="logging level (overrides --verbose if set)")
 
     parser.add_argument("--task", type=str, default="transcribe", choices=["transcribe", "translate"], help="whether to perform X->X speech recognition ('transcribe') or X->English translation ('translate')")
-    parser.add_argument("--language", type=str, default=None, choices=sorted(LANGUAGES.keys()) + sorted([k.title() for k in TO_LANGUAGE_CODE.keys()]), help="language spoken in the audio, specify None to perform language detection")
+    parser.add_argument("--language", type=str, default=None, choices=sorted(LANGUAGES.keys()) + sorted([k.title() for k in TO_LANGUAGE_CODE]), help="language spoken in the audio, specify None to perform language detection")
 
     # alignment params
     parser.add_argument("--align_model", default=None, help="Name of phoneme-level ASR model to do alignment")
@@ -91,7 +90,8 @@ def cli():
     else:
         setup_logging(level="warning")
 
-    from whisperx.transcribe import transcribe_task
+    # Lazy import: avoid loading heavy ASR/VAD/diarize stack before args parse.
+    from whisperx.transcribe import transcribe_task  # noqa: PLC0415
 
     transcribe_task(args, parser)
 

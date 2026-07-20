@@ -22,12 +22,11 @@ Mel params: 80 fbank, 25ms frame, 10ms shift, hamming window.
 Output: [B, 256] L2-normalized embeddings.
 """
 
-import os
 from functools import lru_cache
 
-import mlx.core as mx
-import mlx.nn as nn
+import mlx.core as mx  # pyrefly: ignore[missing-import]
 import numpy as np
+from mlx import nn
 from safetensors import safe_open
 
 SAMPLE_RATE = 16000
@@ -37,8 +36,13 @@ FRAME_SHIFT = int(0.010 * SAMPLE_RATE)  # 160 samples
 N_FFT = 512
 
 
-def _mel_filterbank(n_mels=N_MELS, n_fft=N_FFT, sample_rate=SAMPLE_RATE,
-                    f_min=0.0, f_max=None):
+def _mel_filterbank(
+    n_mels=N_MELS,
+    n_fft=N_FFT,  # noqa: ARG001
+    sample_rate=SAMPLE_RATE,
+    f_min=0.0,
+    f_max=None,
+):
     """Compute mel filterbank matrix (n_fft//2+1, n_mels)."""
     if f_max is None:
         f_max = sample_rate / 2
@@ -75,7 +79,7 @@ def _mel_fbank():
     return _mel_filterbank()
 
 
-def compute_log_mel(audio, sample_rate=SAMPLE_RATE):
+def compute_log_mel(audio, sample_rate=SAMPLE_RATE):  # noqa: ARG001 - fixed at 16kHz
     """Compute log-mel spectrogram from raw audio.
 
     audio: mx.array (samples,) or numpy array, 16kHz.
@@ -101,7 +105,7 @@ def compute_log_mel(audio, sample_rate=SAMPLE_RATE):
     n_frames = 1 + (n_samples - FRAME_LENGTH) // FRAME_SHIFT
     frames = np.empty((n_frames, FRAME_LENGTH), dtype=np.float32)
     for i in range(n_frames):
-        frames[i] = emphasized[i * FRAME_SHIFT:i * FRAME_SHIFT + FRAME_LENGTH]
+        frames[i] = emphasized[i * FRAME_SHIFT : i * FRAME_SHIFT + FRAME_LENGTH]
 
     # Hamming window + FFT.
     window = np.hamming(FRAME_LENGTH).astype(np.float32)
@@ -121,11 +125,13 @@ def compute_log_mel(audio, sample_rate=SAMPLE_RATE):
 
 @lru_cache(maxsize=1)
 def _load_weights():
-    from huggingface_hub import hf_hub_download
+    # Lazy import: huggingface_hub only needed when weights are first loaded.
+    from huggingface_hub import hf_hub_download  # noqa: PLC0415
+
     path = hf_hub_download("aufklarer/WeSpeaker-ResNet34-LM-MLX", "model.safetensors")
     weights = {}
     with safe_open(path, framework="np") as f:
-        for k in f.keys():
+        for k in f:
             weights[k] = mx.array(f.get_tensor(k))
     return weights
 
@@ -157,14 +163,25 @@ def _basic_block(x, prefix, weights, stride=1, has_shortcut=False):
     Shortcut is a 1x1 conv when channels/stride change, else identity.
     """
     identity = x
-    out = _conv2d(x, weights[f"{prefix}.conv1.weight"],
-                  weights[f"{prefix}.conv1.bias"], stride=stride, padding=1)
+    out = _conv2d(
+        x,
+        weights[f"{prefix}.conv1.weight"],
+        weights[f"{prefix}.conv1.bias"],
+        stride=stride,
+        padding=1,
+    )
     out = nn.relu(out)
-    out = _conv2d(out, weights[f"{prefix}.conv2.weight"],
-                  weights[f"{prefix}.conv2.bias"], stride=1, padding=1)
+    out = _conv2d(
+        out, weights[f"{prefix}.conv2.weight"], weights[f"{prefix}.conv2.bias"], stride=1, padding=1
+    )
     if has_shortcut:
-        identity = _conv2d(x, weights[f"{prefix}.shortcut.weight"],
-                           weights[f"{prefix}.shortcut.bias"], stride=stride, padding=0)
+        identity = _conv2d(
+            x,
+            weights[f"{prefix}.shortcut.weight"],
+            weights[f"{prefix}.shortcut.bias"],
+            stride=stride,
+            padding=0,
+        )
     out = out + identity
     return nn.relu(out)
 
@@ -173,11 +190,10 @@ def _layer(x, layer_idx, weights, num_blocks, stride):
     """Full ResNet layer. First block has shortcut if stride>1 or channels change."""
     for b in range(num_blocks):
         prefix = f"layer{layer_idx}.{b}"
-        is_first = (b == 0)
+        is_first = b == 0
         block_stride = stride if is_first else 1
         has_shortcut = is_first and f"{prefix}.shortcut.weight" in weights
-        x = _basic_block(x, prefix, weights,
-                         stride=block_stride, has_shortcut=has_shortcut)
+        x = _basic_block(x, prefix, weights, stride=block_stride, has_shortcut=has_shortcut)
     return x
 
 
@@ -191,8 +207,7 @@ def _wespeaker_forward(log_mel, weights):
     elif log_mel.ndim == 2:
         log_mel = log_mel[None, :, :, None]  # (T, 80) -> (1, T, 80, 1)
 
-    x = _conv2d(log_mel, weights["conv1.weight"], weights["conv1.bias"],
-                stride=1, padding=1)
+    x = _conv2d(log_mel, weights["conv1.weight"], weights["conv1.bias"], stride=1, padding=1)
     x = nn.relu(x)
 
     x = _layer(x, 1, weights, num_blocks=3, stride=1)
@@ -205,7 +220,7 @@ def _wespeaker_forward(log_mel, weights):
     mean = x.mean(axis=1)  # (B, F, C)
     std = mx.sqrt(x.var(axis=1) + 1e-5)
     pooled = mx.concatenate([mean, std], axis=-1)  # (B, F, 2C)
-    B = pooled.shape[0]
+    B = pooled.shape[0]  # noqa: N806 - batch dim, tensor-shape convention
     pooled = pooled.reshape(B, -1)  # (B, F * 2C) = (B, 5120)
 
     # Embedding layer.

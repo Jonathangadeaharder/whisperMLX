@@ -2,8 +2,7 @@ import importlib
 
 
 def _lazy_import(name):
-    module = importlib.import_module(f"whisperx.{name}")
-    return module
+    return importlib.import_module(f"whisperx.{name}")
 
 
 def load_align_model(*args, **kwargs):
