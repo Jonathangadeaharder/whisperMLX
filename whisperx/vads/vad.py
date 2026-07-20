@@ -1,7 +1,6 @@
 from typing import Optional
 
 import pandas as pd
-from pyannote.core import Annotation, Segment
 
 
 class Vad:
@@ -15,7 +14,7 @@ class Vad:
     def preprocess_audio(audio):
         pass
 
-    # keep merge_chunks as static so it can be also used by manually assigned vad_model (see 'load_model')
+    # Static so manually assigned vad_model can use it (see load_model).
     @staticmethod
     def merge_chunks(segments,
                      chunk_size,
