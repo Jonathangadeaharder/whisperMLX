@@ -8,7 +8,6 @@ from typing import Iterable, Optional, Union, List
 import numpy as np
 import pandas as pd
 import torch
-import torchaudio
 from transformers import Wav2Vec2ForCTC, Wav2Vec2Processor
 
 from whisperx.audio import SAMPLE_RATE, load_audio
@@ -29,15 +28,12 @@ logger = get_logger(__name__)
 
 LANGUAGES_WITHOUT_SPACES = ["ja", "zh"]
 
-DEFAULT_ALIGN_MODELS_TORCH = {
-    "en": "WAV2VEC2_ASR_BASE_960H",
-    "fr": "VOXPOPULI_ASR_BASE_10K_FR",
-    "de": "VOXPOPULI_ASR_BASE_10K_DE",
-    "es": "VOXPOPULI_ASR_BASE_10K_ES",
-    "it": "VOXPOPULI_ASR_BASE_10K_IT",
-}
-
 DEFAULT_ALIGN_MODELS_HF = {
+    "en": "facebook/wav2vec2-base-960h",
+    "fr": "jonatasgrosman/wav2vec2-large-xlsr-53-french",
+    "de": "jonatasgrosman/wav2vec2-large-xlsr-53-german",
+    "es": "jonatasgrosman/wav2vec2-large-xlsr-53-spanish",
+    "it": "jonatasgrosman/wav2vec2-large-xlsr-53-italian",
     "ja": "jonatasgrosman/wav2vec2-large-xlsr-53-japanese",
     "zh": "jonatasgrosman/wav2vec2-large-xlsr-53-chinese-zh-cn",
     "nl": "jonatasgrosman/wav2vec2-large-xlsr-53-dutch",
@@ -80,9 +76,7 @@ DEFAULT_ALIGN_MODELS_HF = {
 def load_align_model(language_code: str, device: str, model_name: Optional[str] = None, model_dir=None, model_cache_only: bool = False):
     if model_name is None:
         # use default model
-        if language_code in DEFAULT_ALIGN_MODELS_TORCH:
-            model_name = DEFAULT_ALIGN_MODELS_TORCH[language_code]
-        elif language_code in DEFAULT_ALIGN_MODELS_HF:
+        if language_code in DEFAULT_ALIGN_MODELS_HF:
             model_name = DEFAULT_ALIGN_MODELS_HF[language_code]
         else:
             logger.error(f"No default alignment model for language: {language_code}. "
@@ -90,26 +84,18 @@ def load_align_model(language_code: str, device: str, model_name: Optional[str] 
                          f"then pass the model name via --align_model [MODEL_NAME]")
             raise ValueError(f"No default align-model for language: {language_code}")
 
-    if model_name in torchaudio.pipelines.__all__:
-        pipeline_type = "torchaudio"
-        bundle = torchaudio.pipelines.__dict__[model_name]
-        align_model = bundle.get_model(dl_kwargs={"model_dir": model_dir}).to(device)
-        labels = bundle.get_labels()
-        align_dictionary = {c.lower(): i for i, c in enumerate(labels)}
-    else:
-        try:
-            processor = Wav2Vec2Processor.from_pretrained(model_name, cache_dir=model_dir, local_files_only=model_cache_only)
-            align_model = Wav2Vec2ForCTC.from_pretrained(model_name, cache_dir=model_dir, local_files_only=model_cache_only)
-        except Exception as e:
-            print(e)
-            print(f"Error loading model from huggingface, check https://huggingface.co/models for finetuned wav2vec2.0 models")
-            raise ValueError(f'The chosen align_model "{model_name}" could not be found in huggingface (https://huggingface.co/models) or torchaudio (https://pytorch.org/audio/stable/pipelines.html#id14)')
-        pipeline_type = "huggingface"
-        align_model = align_model.to(device)
-        labels = processor.tokenizer.get_vocab()
-        align_dictionary = {char.lower(): code for char,code in processor.tokenizer.get_vocab().items()}
+    try:
+        processor = Wav2Vec2Processor.from_pretrained(model_name, cache_dir=model_dir, local_files_only=model_cache_only)
+        align_model = Wav2Vec2ForCTC.from_pretrained(model_name, cache_dir=model_dir, local_files_only=model_cache_only)
+    except Exception as e:
+        print(e)
+        print(f"Error loading model from huggingface, check https://huggingface.co/models for finetuned wav2vec2.0 models")
+        raise ValueError(f'The chosen align_model "{model_name}" could not be found in huggingface (https://huggingface.co/models)')
+    align_model = align_model.to(device)
+    labels = processor.tokenizer.get_vocab()
+    align_dictionary = {char.lower(): code for char, code in labels.items()}
 
-    align_metadata = {"language": language_code, "dictionary": align_dictionary, "type": pipeline_type}
+    align_metadata = {"language": language_code, "dictionary": align_dictionary, "type": "huggingface"}
 
     return align_model, align_metadata
 
@@ -141,7 +127,8 @@ def align(
 
     model_dictionary = align_model_metadata["dictionary"]
     model_lang = align_model_metadata["language"]
-    model_type = align_model_metadata["type"]
+    # wav2vec2 inference still runs on torch (transformers); CTC math
+    # (trellis, backtrack, wildcard) is numpy below.
 
     # Use language-specific Punkt model if available otherwise we fallback to English.
     punkt_lang = PUNKT_LANGUAGES.get(model_lang, 'english')
@@ -252,38 +239,32 @@ def align(
         waveform_segment = audio[:, f1:f2]
         # Handle the minimum input length for wav2vec2 models
         if waveform_segment.shape[-1] < 400:
-            lengths = torch.as_tensor([waveform_segment.shape[-1]]).to(device)
             waveform_segment = torch.nn.functional.pad(
                 waveform_segment, (0, 400 - waveform_segment.shape[-1])
             )
-        else:
-            lengths = None
 
+        # wav2vec2 inference still on torch (transformers); CTC math below
+        # is pure numpy once we have the log-softmax emission matrix.
         with torch.inference_mode():
-            if model_type == "torchaudio":
-                emissions, _ = model(waveform_segment.to(device), lengths=lengths)
-            elif model_type == "huggingface":
-                emissions = model(waveform_segment.to(device)).logits
-            else:
-                raise NotImplementedError(f"Align model of type {model_type} not supported.")
+            emissions = model(waveform_segment.to(device)).logits
             emissions = torch.log_softmax(emissions, dim=-1)
 
-        emission = emissions[0].cpu().detach()
+        emission = emissions[0].cpu().numpy()
 
         blank_id = 0
         for char, code in model_dictionary.items():
             if char == '[pad]' or char == '<pad>':
                 blank_id = code
 
-        # Build tokens, mapping unknown chars to a wildcard column
+        # Build tokens, mapping unknown chars to a wildcard column.
         has_wildcard = any(c not in model_dictionary for c in text_clean)
         if has_wildcard:
-            # Extend emission with a wildcard column: max non-blank score per frame
-            non_blank_mask = torch.ones(emission.size(1), dtype=torch.bool)
+            # Extend emission with a wildcard column: max non-blank score per frame.
+            non_blank_mask = np.ones(emission.shape[1], dtype=bool)
             non_blank_mask[blank_id] = False
-            wildcard_col = emission[:, non_blank_mask].max(dim=1).values
-            emission = torch.cat([emission, wildcard_col.unsqueeze(1)], dim=1)
-            wildcard_id = emission.size(1) - 1
+            wildcard_col = emission[:, non_blank_mask].max(axis=1)
+            emission = np.column_stack([emission, wildcard_col])
+            wildcard_id = emission.shape[1] - 1
             tokens = [model_dictionary.get(c, wildcard_id) for c in text_clean]
         else:
             tokens = [model_dictionary[c] for c in text_clean]
@@ -299,7 +280,7 @@ def align(
         char_segments = merge_repeats(path, text_clean)
 
         duration = t2 - t1
-        ratio = duration * waveform_segment.size(0) / (trellis.size(0) - 1)
+        ratio = duration * waveform_segment.size(0) / (trellis.shape[0] - 1)
 
         # assign timestamps to aligned characters
         char_segments_arr = []
@@ -322,7 +303,8 @@ def align(
                 }
             )
 
-            # increment word_idx, nltk word tokenization would probably be more robust here, but us space for now...
+            # Increment word_idx on space (nltk tokenization would be
+            # more robust, but space-splitting suffices for now).
             if model_lang in LANGUAGES_WITHOUT_SPACES:
                 word_idx += 1
             elif cdx == len(text) - 1 or text[cdx+1] == " ":
@@ -423,26 +405,25 @@ def align(
 
     return {"segments": aligned_segments, "word_segments": word_segments}
 
-"""
-source: https://pytorch.org/tutorials/intermediate/forced_alignment_with_torchaudio_tutorial.html
-"""
+
+# CTC forced alignment based on the torchaudio tutorial (pytorch.org).
 
 
 def get_trellis(emission, tokens, blank_id=0):
-    num_frame = emission.size(0)
+    num_frame = emission.shape[0]
     num_tokens = len(tokens)
 
     # Trellis has extra dimensions for both time axis and tokens.
     # The extra dim for tokens represents <SoS> (start-of-sentence)
     # The extra dim for time axis is for simplification of the code.
-    trellis = torch.empty((num_frame + 1, num_tokens + 1))
+    trellis = np.empty((num_frame + 1, num_tokens + 1), dtype=np.float32)
     trellis[0, 0] = 0
-    trellis[1:, 0] = torch.cumsum(emission[:, blank_id], 0)
+    trellis[1:, 0] = np.cumsum(emission[:, blank_id], 0)
     trellis[0, -num_tokens:] = -float("inf")
     trellis[-num_tokens:, 0] = float("inf")
 
     for t in range(num_frame):
-        trellis[t + 1, 1:] = torch.maximum(
+        trellis[t + 1, 1:] = np.maximum(
             # Score for staying at the same token
             trellis[t, 1:] + emission[t, blank_id],
             # Score for changing to the next token
@@ -459,28 +440,23 @@ class Point:
 
 
 def backtrack(trellis, emission, tokens, blank_id=0):
-    # Note:
-    # j and t are indices for trellis, which has extra dimensions
-    # for time and tokens at the beginning.
-    # When referring to time frame index `T` in trellis,
-    # the corresponding index in emission is `T-1`.
-    # Similarly, when referring to token index `J` in trellis,
-    # the corresponding index in transcript is `J-1`.
-    j = trellis.size(1) - 1
-    t_start = torch.argmax(trellis[:, j]).item()
+    # j, t are trellis indices (extra dims for time/token at start).
+    # Trellis frame T maps to emission index T-1; trellis token J
+    # maps to transcript index J-1.
+    j = trellis.shape[1] - 1
+    t_start = int(np.argmax(trellis[:, j]))
 
     path = []
     for t in range(t_start, 0, -1):
         # 1. Figure out if the current position was stay or change
-        # Note (again):
-        # `emission[J-1]` is the emission at time frame `J` of trellis dimension.
+        # `emission[J-1]` is the emission at time frame `J` of trellis.
         # Score for token staying the same from time frame J-1 to T.
         stayed = trellis[t - 1, j] + emission[t - 1, blank_id]
         # Score for token changing from C-1 at T-1 to J at T.
         changed = trellis[t - 1, j - 1] + emission[t - 1, tokens[j - 1]]
 
         # 2. Store the path with frame-wise probability.
-        prob = emission[t - 1, tokens[j - 1] if changed > stayed else blank_id].exp().item()
+        prob = float(np.exp(emission[t - 1, tokens[j - 1] if changed > stayed else blank_id]))
         # Return token index and time index in non-trellis coordinate.
         path.append(Point(j - 1, t - 1, prob))
 
