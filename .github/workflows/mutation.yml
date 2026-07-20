@@ -1,0 +1,42 @@
+name: Mutation Testing
+
+on:
+  schedule:
+    - cron: "0 3 * * *"  # 03:00 UTC daily
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  issues: write
+
+jobs:
+  mutmut:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+      - name: Install uv
+        uses: astral-sh/setup-uv@d4b2f3b6ecc6e67c4457f6d3e41ec42d3d0fcb86 # v5.4.2
+        with:
+          version: "0.11.6"
+          python-version: "3.12"
+      - name: Install project (dev extras)
+        run: uv sync --all-extras
+      - name: Run mutmut
+        run: uv run mutmut run --use-coverage
+      - name: Show results
+        if: always()
+        run: uv run mutmut results
+      - name: Open issue on low score
+        if: failure()
+        uses: actions/github-script@60a0d8302b8434c3785a5b8d82105392f3c399f0 # v7.0.1
+        with:
+          script: |
+            github.rest.issues.create({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              title: "Mutation score below threshold",
+              body: "Mutation testing run dropped below 80%. See: " + context.runId,
+              labels: ["quality", "mutation"],
+            });

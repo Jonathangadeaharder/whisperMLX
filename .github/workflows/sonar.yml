@@ -1,0 +1,42 @@
+name: SonarCloud
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pull-requests: read
+
+jobs:
+  sonar:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@d4b2f3b6ecc6e67c4457f6d3e41ec42d3d0fcb86 # v5.4.2
+        with:
+          version: "0.11.6"
+          python-version: "3.12"
+
+      - name: Install project
+        run: uv sync --all-extras
+
+      - name: Ruff (JSON report)
+        run: uv run ruff check whisperx/ tests/ --output-format=json --output-file=ruff.json || true
+
+      - name: Pytest (coverage + junit)
+        run: uv run pytest tests/ -m "not e2e" --cov=whisperx --cov-branch --cov-report=xml:coverage.xml --cov-report=term --junitxml=test-results.xml
+
+      - name: SonarCloud Scan
+        uses: SonarSource/sonarcloud-github-action@eb2117251f9ca0497dd5a7265016a424b9296c9c # v5.0.0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
