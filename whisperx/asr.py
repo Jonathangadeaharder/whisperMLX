@@ -6,7 +6,7 @@ import numpy as np
 import torch
 from transformers import WhisperTokenizer
 
-from whisperx.audio import N_SAMPLES, SAMPLE_RATE, load_audio
+from whisperx.audio import SAMPLE_RATE, load_audio
 from whisperx.schema import SingleSegment, TranscriptionResult, ProgressCallback
 from whisperx.vads import Vad, Silero, Pyannote
 from whisperx.log_utils import get_logger
