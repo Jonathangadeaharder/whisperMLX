@@ -1,12 +1,15 @@
 <h1 align="center">WhisperMLX</h1>
 
-> **Fork notice.** This is an Apple Silicon port of [whisperX](https://github.com/m-bain/whisperX)
-> by Max Bain et al. The ASR engine is swapped from `faster-whisper` / `ctranslate2` to
+> **Fork notice.** Apple Silicon port of [whisperX](https://github.com/m-bain/whisperX)
+> by Max Bain et al. The full pipeline runs on MLX: ASR via
 > [`mlx-whisper`](https://github.com/ml-explore/mlx-examples/tree/main/whisper),
-> which runs on the Apple Silicon GPU via MLX. Voice activity detection (silero, pyannote),
-> forced phoneme alignment (wav2vec2), and speaker diarization (pyannote) are unchanged and
-> still require PyTorch. Batched segment inference is not supported in v1: mlx-whisper transcribes
-> one VAD segment at a time. Original BSD-2-Clause license and upstream attribution preserved.
+> VAD via MLX ports of Silero and Pyannote segmentation, diarization via an
+> MLX WeSpeaker ResNet34 embedder plus sklearn clustering. Forced phoneme
+> alignment still runs wav2vec2 (transformers) on torch; the CTC dynamic
+> programming (trellis, backtrack, wildcard) is reimplemented in numpy. Batched
+> segment inference is not supported in v1: mlx-whisper transcribes one VAD
+> segment at a time. Original BSD-2-Clause license and upstream attribution
+> preserved.
 
 ## Install
 
@@ -28,7 +31,7 @@ Model aliases (`tiny`, `base`, `small`, `medium`, `large`, `large-v2`, `large-v3
 
 `--batch_size`, `--compute_type`, and `--device_index` are accepted for CLI
 compatibility but ignored by the mlx-whisper backend. `--device` only affects the
-VAD / alignment / diarization steps (default `mps`).
+alignment step (default `mps`); VAD, ASR, and diarization run on MLX and ignore it.
 
 ---
 

@@ -10,15 +10,18 @@ from whisperx.utils import interpolate_nans
 
 
 def _make_mock_model(emission, dictionary):
-    """Create a mock torchaudio-style model that returns a fixed emission matrix.
+    """Mock a transformers Wav2Vec2ForCTC model returning a fixed emission.
 
-    The emission should be pre-log-softmax logits of shape (num_frames, vocab_size).
-    align() will apply log_softmax itself.
+    emission: pre-log-softmax logits, shape (num_frames, vocab_size).
+    align() applies log_softmax itself. The model call must return an object
+    with a `.logits` attribute (the transformers CTC interface).
     """
     model = MagicMock()
-    # torchaudio interface: model(waveform, lengths=lengths) -> (emissions, _)
-    # emissions shape: (batch=1, num_frames, vocab_size)
-    model.return_value = (emission.unsqueeze(0), None)
+    # transformers interface: model(waveform).logits
+    # logits shape: (batch=1, num_frames, vocab_size)
+    output = MagicMock()
+    output.logits = emission.unsqueeze(0)
+    model.return_value = output
     return model
 
 
