@@ -1,4 +1,40 @@
-<h1 align="center">WhisperX</h1>
+<h1 align="center">WhisperMLX</h1>
+
+> **Fork notice.** This is an Apple Silicon port of [whisperX](https://github.com/m-bain/whisperX)
+> by Max Bain et al. The ASR engine is swapped from `faster-whisper` / `ctranslate2` to
+> [`mlx-whisper`](https://github.com/ml-explore/mlx-examples/tree/main/whisper),
+> which runs on the Apple Silicon GPU via MLX. Voice activity detection (silero, pyannote),
+> forced phoneme alignment (wav2vec2), and speaker diarization (pyannote) are unchanged and
+> still require PyTorch. Batched segment inference is not supported in v1: mlx-whisper transcribes
+> one VAD segment at a time. Original BSD-2-Clause license and upstream attribution preserved.
+
+## Install
+
+Requires macOS on Apple Silicon.
+
+```bash
+uv sync
+```
+
+## CLI
+
+```bash
+uv run whispermlx audio.mp3 --model small --language en
+```
+
+Model aliases (`tiny`, `base`, `small`, `medium`, `large`, `large-v2`, `large-v3`,
+`large-v3-turbo`, `turbo`) resolve to `mlx-community/whisper-<name>` repos. Pass an
+`mlx-community/...` repo or a local path to use a specific quantized model.
+
+`--batch_size`, `--compute_type`, and `--device_index` are accepted for CLI
+compatibility but ignored by the mlx-whisper backend. `--device` only affects the
+VAD / alignment / diarization steps (default `mps`).
+
+---
+
+# Upstream WhisperX README
+
+
 
 ## Recall.ai - Meeting Transcription API
 
