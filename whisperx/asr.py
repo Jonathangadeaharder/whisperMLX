@@ -1,227 +1,101 @@
 import os
 from typing import List, Optional, Union
-from dataclasses import replace
 
-import ctranslate2
-import faster_whisper
+import mlx_whisper
 import numpy as np
 import torch
-from faster_whisper.tokenizer import Tokenizer
-from faster_whisper.transcribe import TranscriptionOptions, get_ctranslate2_storage
-from transformers import Pipeline
-from transformers.pipelines.pt_utils import PipelineIterator
+from transformers import WhisperTokenizer
 
-from whisperx.audio import N_SAMPLES, SAMPLE_RATE, load_audio, log_mel_spectrogram
+from whisperx.audio import N_SAMPLES, SAMPLE_RATE, load_audio
 from whisperx.schema import SingleSegment, TranscriptionResult, ProgressCallback
 from whisperx.vads import Vad, Silero, Pyannote
 from whisperx.log_utils import get_logger
 
 logger = get_logger(__name__)
 
+# Map whisperX model aliases to mlx-community Hugging Face repos.
+# Pass through if the arch already names a repo (contains "/") or an
+# mlx-community prefix.
+_MLX_COMMUNITY = "mlx-community/whisper-"
 
-def find_numeral_symbol_tokens(tokenizer):
-    numeral_symbol_tokens = []
-    for i in range(tokenizer.eot):
+
+def _resolve_model_path(whisper_arch: str) -> str:
+    """Resolve a whisperX model alias to an mlx-whisper model path/repo."""
+    if "/" in whisper_arch:
+        return whisper_arch
+    if whisper_arch.startswith("mlx"):
+        return whisper_arch
+    return _MLX_COMMUNITY + whisper_arch
+
+
+def find_numeral_symbol_tokens(tokenizer) -> List[int]:
+    """Token ids whose decoded string contains a numeral or currency symbol."""
+    numeral_symbol_tokens: List[int] = []
+    eot = getattr(tokenizer, "eot", None)
+    if eot is None:
+        eot = tokenizer.vocab_size
+    for i in range(eot):
         token = tokenizer.decode([i]).removeprefix(" ")
         has_numeral_symbol = any(c in "0123456789%$£" for c in token)
         if has_numeral_symbol:
             numeral_symbol_tokens.append(i)
     return numeral_symbol_tokens
 
-class WhisperModel(faster_whisper.WhisperModel):
-    '''
-    FasterWhisperModel provides batched inference for faster-whisper.
-    Currently only works in non-timestamp mode and fixed prompt for all samples in batch.
-    '''
 
-    def generate_segment_batched(
-        self,
-        features: np.ndarray,
-        tokenizer: Tokenizer,
-        options: TranscriptionOptions,
-        encoder_output=None,
-    ):
-        batch_size = features.shape[0]
-        all_tokens = []
-        prompt_reset_since = 0
-        if options.initial_prompt is not None:
-            initial_prompt = " " + options.initial_prompt.strip()
-            initial_prompt_tokens = tokenizer.encode(initial_prompt)
-            all_tokens.extend(initial_prompt_tokens)
-        previous_tokens = all_tokens[prompt_reset_since:]
-        prompt = self.get_prompt(
-            tokenizer,
-            previous_tokens,
-            without_timestamps=options.without_timestamps,
-            prefix=options.prefix,
-            hotwords=options.hotwords
-        )
+class MlxWhisperPipeline:
+    """Pipeline that runs VAD then transcribes each segment with mlx-whisper.
 
-        encoder_output = self.encode(features)
-        
-        result = self.model.generate(
-                encoder_output,
-                [prompt] * batch_size,
-                beam_size=options.beam_size,
-                patience=options.patience,
-                length_penalty=options.length_penalty,
-                max_length=self.max_length,
-                suppress_blank=options.suppress_blank,
-                suppress_tokens=options.suppress_tokens,
-                no_repeat_ngram_size=options.no_repeat_ngram_size,
-                repetition_penalty=options.repetition_penalty,
-                return_scores=True,
-            )
-
-        tokens_batch = [x.sequences_ids[0] for x in result]
-
-        avg_logprobs = []
-        for res in result:
-            seq_len = len(res.sequences_ids[0])
-            cum_logprob = res.scores[0] * (seq_len ** options.length_penalty)
-            avg_logprobs.append(cum_logprob / (seq_len + 1))
-
-        def decode_batch(tokens: List[List[int]]) -> List[str]:
-            res = []
-            for tk in tokens:
-                res.append([token for token in tk if token < tokenizer.eot])
-            # text_tokens = [token for token in tokens if token < self.eot]
-            return tokenizer.tokenizer.decode_batch(res)
-
-        text = decode_batch(tokens_batch)
-
-        return {'text': text, 'avg_logprob': avg_logprobs}
-
-    def encode(self, features: np.ndarray) -> ctranslate2.StorageView:
-        # When the model is running on multiple GPUs, the encoder output should be moved
-        # to the CPU since we don't know which GPU will handle the next job.
-        to_cpu = self.model.device == "cuda" and len(self.model.device_index) > 1
-        # unsqueeze if batch size = 1
-        if len(features.shape) == 2:
-            features = np.expand_dims(features, 0)
-        features = get_ctranslate2_storage(features)
-
-        return self.model.encode(features, to_cpu=to_cpu)
-
-class FasterWhisperPipeline(Pipeline):
+    Replaces whisperX's FasterWhisperPipeline. Per-segment transcription only
+    (no batched encoder runs); mlx-whisper runs on the Apple Silicon GPU.
     """
-    Huggingface Pipeline wrapper for FasterWhisperModel.
-    """
-    # TODO:
-    # - add support for timestamp mode
-    # - add support for custom inference kwargs
 
     def __init__(
         self,
-        model: WhisperModel,
+        model_path: str,
         vad,
         vad_params: dict,
-        options: TranscriptionOptions,
-        tokenizer: Optional[Tokenizer] = None,
-        device: Union[int, str, "torch.device"] = -1,
-        framework="pt",
+        mlx_options: dict,
         language: Optional[str] = None,
         suppress_numerals: bool = False,
-        **kwargs,
+        suppress_tokens: Optional[List[int]] = None,
     ):
-        self.model = model
-        self.tokenizer = tokenizer
-        self.options = options
-        self.preset_language = language
-        self.suppress_numerals = suppress_numerals
-        self._batch_size = kwargs.pop("batch_size", None)
-        self._num_workers = 1
-        self._preprocess_params, self._forward_params, self._postprocess_params = self._sanitize_parameters(**kwargs)
-        self.call_count = 0
-        self.framework = framework
-        if self.framework == "pt":
-            if isinstance(device, torch.device):
-                self.device = device
-            elif isinstance(device, str):
-                self.device = torch.device(device)
-            elif device < 0:
-                self.device = torch.device("cpu")
-            else:
-                self.device = torch.device(f"cuda:{device}")
-        else:
-            self.device = device
-
-        super(Pipeline, self).__init__()
+        self.model_path = model_path
         self.vad_model = vad
         self._vad_params = vad_params
-
-    def _sanitize_parameters(self, **kwargs):
-        preprocess_kwargs = {}
-        if "tokenizer" in kwargs:
-            preprocess_kwargs["maybe_arg"] = kwargs["maybe_arg"]
-        return preprocess_kwargs, {}, {}
-
-    def preprocess(self, audio):
-        audio = audio['inputs']
-        model_n_mels = self.model.feat_kwargs.get("feature_size")
-        features = log_mel_spectrogram(
-            audio,
-            n_mels=model_n_mels if model_n_mels is not None else 80,
-            padding=N_SAMPLES - audio.shape[0],
-        )
-        return {'inputs': features}
-
-    def _forward(self, model_inputs):
-        outputs = self.model.generate_segment_batched(model_inputs['inputs'], self.tokenizer, self.options)
-        return outputs
-
-    def postprocess(self, model_outputs):
-        return model_outputs
-
-    def get_iterator(
-        self,
-        inputs,
-        num_workers: int,
-        batch_size: int,
-        preprocess_params: dict,
-        forward_params: dict,
-        postprocess_params: dict,
-    ):
-        dataset = PipelineIterator(inputs, self.preprocess, preprocess_params)
-        if "TOKENIZERS_PARALLELISM" not in os.environ:
-            os.environ["TOKENIZERS_PARALLELISM"] = "false"
-        # TODO hack by collating feature_extractor and image_processor
-
-        def stack(items):
-            return {'inputs': torch.stack([x['inputs'] for x in items])}
-        dataloader = torch.utils.data.DataLoader(dataset, num_workers=num_workers, batch_size=batch_size, collate_fn=stack)
-        model_iterator = PipelineIterator(dataloader, self.forward, forward_params, loader_batch_size=batch_size)
-        final_iterator = PipelineIterator(model_iterator, self.postprocess, postprocess_params)
-        return final_iterator
+        self._mlx_options = mlx_options
+        self.preset_language = language
+        self.suppress_numerals = suppress_numerals
+        self.suppress_tokens = suppress_tokens
 
     def transcribe(
         self,
         audio: Union[str, np.ndarray],
         batch_size: Optional[int] = None,
-        num_workers=0,
+        num_workers: int = 0,
         language: Optional[str] = None,
         task: Optional[str] = None,
-        chunk_size=30,
-        print_progress=False,
-        combined_progress=False,
-        verbose=False,
+        chunk_size: int = 30,
+        print_progress: bool = False,
+        combined_progress: bool = False,
+        verbose: bool = False,
         progress_callback: ProgressCallback = None,
     ) -> TranscriptionResult:
+        if batch_size not in (None, 0, 1):
+            logger.info(
+                "batch_size=%s ignored; mlx-whisper transcribes one segment at a time",
+                batch_size,
+            )
+        if num_workers:
+            logger.info("num_workers=%s ignored by mlx-whisper pipeline", num_workers)
+
         if isinstance(audio, str):
             audio = load_audio(audio)
 
-        def data(audio, segments):
-            for seg in segments:
-                f1 = int(seg['start'] * SAMPLE_RATE)
-                f2 = int(seg['end'] * SAMPLE_RATE)
-                # print(f2-f1)
-                yield {'inputs': audio[f1:f2]}
-
-        # Pre-process audio and merge chunks as defined by the respective VAD child class 
-        # In case vad_model is manually assigned (see 'load_model') follow the functionality of pyannote toolkit
+        # Pre-process audio and merge chunks as defined by the VAD child class.
+        # Manually assigned VAD models follow the pyannote toolkit interface.
         if issubclass(type(self.vad_model), Vad):
             waveform = self.vad_model.preprocess_audio(audio)
-            merge_chunks =  self.vad_model.merge_chunks
+            merge_chunks = self.vad_model.merge_chunks
         else:
             waveform = Pyannote.preprocess_audio(audio)
             merge_chunks = Pyannote.merge_chunks
@@ -233,142 +107,121 @@ class FasterWhisperPipeline(Pipeline):
             onset=self._vad_params["vad_onset"],
             offset=self._vad_params["vad_offset"],
         )
-        if self.tokenizer is None:
-            language = language or self.detect_language(audio)
-            task = task or "transcribe"
-            self.tokenizer = Tokenizer(
-                self.model.hf_tokenizer,
-                self.model.model.is_multilingual,
-                task=task,
-                language=language,
-            )
-        else:
-            language = language or self.tokenizer.language_code
-            task = task or self.tokenizer.task
-            if task != self.tokenizer.task or language != self.tokenizer.language_code:
-                self.tokenizer = Tokenizer(
-                    self.model.hf_tokenizer,
-                    self.model.model.is_multilingual,
-                    task=task,
-                    language=language,
-                )
 
-        if self.suppress_numerals:
-            previous_suppress_tokens = self.options.suppress_tokens
-            numeral_symbol_tokens = find_numeral_symbol_tokens(self.tokenizer)
-            logger.info("Suppressing numeral and symbol tokens")
-            new_suppressed_tokens = numeral_symbol_tokens + self.options.suppress_tokens
-            new_suppressed_tokens = list(set(new_suppressed_tokens))
-            self.options = replace(self.options, suppress_tokens=new_suppressed_tokens)
+        language = language or self.preset_language
+        task = task or "transcribe"
 
         segments: List[SingleSegment] = []
-        batch_size = batch_size or self._batch_size
         total_segments = len(vad_segments)
-        for idx, out in enumerate(self.__call__(data(audio, vad_segments), batch_size=batch_size, num_workers=num_workers)):
+        for idx, seg in enumerate(vad_segments):
+            f1 = int(seg["start"] * SAMPLE_RATE)
+            f2 = int(seg["end"] * SAMPLE_RATE)
+            audio_slice = audio[f1:f2]
+
+            seg_kwargs = dict(self._mlx_options)
+            if language is not None:
+                seg_kwargs["language"] = language
+            seg_kwargs["task"] = task
+            if self.suppress_tokens is not None:
+                seg_kwargs["suppress_tokens"] = self.suppress_tokens
+
+            result = mlx_whisper.transcribe(
+                audio_slice,
+                path_or_hf_repo=self.model_path,
+                **seg_kwargs,
+            )
+            if language is None:
+                language = result.get("language")
+                if language is not None and self.preset_language is None:
+                    logger.info("Detected language: %s", language)
+
+            seg_offset = seg["start"]
+            for sub in result.get("segments", []):
+                text = sub.get("text", "").strip()
+                if not text:
+                    continue
+                segments.append(
+                    {
+                        "text": text,
+                        "start": round(seg_offset + sub.get("start", 0.0), 3),
+                        "end": round(seg_offset + sub.get("end", 0.0), 3),
+                        "avg_logprob": sub.get("avg_logprob"),
+                    }
+                )
+                if verbose:
+                    print(
+                        f"Transcript: [{segments[-1]['start']} --> "
+                        f"{segments[-1]['end']}] {text}"
+                    )
+
             if print_progress:
                 base_progress = ((idx + 1) / total_segments) * 100
-                percent_complete = base_progress / 2 if combined_progress else base_progress
+                percent_complete = (
+                    base_progress / 2 if combined_progress else base_progress
+                )
                 print(f"Progress: {percent_complete:.2f}%...")
             if progress_callback is not None:
                 progress_callback(((idx + 1) / total_segments) * 100)
-            text = out['text']
-            avg_logprob = out['avg_logprob']
-            if batch_size in [0, 1, None]:
-                text = text[0]
-                avg_logprob = avg_logprob[0]
-            if verbose:
-                print(f"Transcript: [{round(vad_segments[idx]['start'], 3)} --> {round(vad_segments[idx]['end'], 3)}] {text}")
-            segments.append(
-                {
-                    "text": text,
-                    "start": round(vad_segments[idx]['start'], 3),
-                    "end": round(vad_segments[idx]['end'], 3),
-                    "avg_logprob": avg_logprob,
-                }
-            )
 
-        # revert the tokenizer if multilingual inference is enabled
-        if self.preset_language is None:
-            self.tokenizer = None
-
-        # revert suppressed tokens if suppress_numerals is enabled
-        if self.suppress_numerals:
-            self.options = replace(self.options, suppress_tokens=previous_suppress_tokens)
-
-        return {"segments": segments, "language": language}
-
-    def detect_language(self, audio: np.ndarray) -> str:
-        if audio.shape[0] < N_SAMPLES:
-            logger.warning("Audio is shorter than 30s, language detection may be inaccurate")
-        model_n_mels = self.model.feat_kwargs.get("feature_size")
-        segment = log_mel_spectrogram(audio[: N_SAMPLES],
-                                      n_mels=model_n_mels if model_n_mels is not None else 80,
-                                      padding=0 if audio.shape[0] >= N_SAMPLES else N_SAMPLES - audio.shape[0])
-        encoder_output = self.model.encode(segment)
-        results = self.model.model.detect_language(encoder_output)
-        language_token, language_probability = results[0][0]
-        language = language_token[2:-2]
-        logger.info(f"Detected language: {language} ({language_probability:.2f}) in first 30s of audio")
-        return language
+        return {"segments": segments, "language": language or "en"}
 
 
 def load_model(
     whisper_arch: str,
     device: str,
-    device_index=0,
-    compute_type="default",
+    device_index: int = 0,
+    compute_type: str = "default",
     asr_options: Optional[dict] = None,
     language: Optional[str] = None,
-    vad_model: Optional[Vad]= None,
+    vad_model: Optional[Vad] = None,
     vad_method: Optional[str] = "pyannote",
     vad_options: Optional[dict] = None,
-    model: Optional[WhisperModel] = None,
-    task="transcribe",
+    model: Optional[object] = None,
+    task: str = "transcribe",
     download_root: Optional[str] = None,
-    local_files_only=False,
-    threads=4,
+    local_files_only: bool = False,
+    threads: int = 4,
     use_auth_token: Optional[Union[str, bool]] = None,
-) -> FasterWhisperPipeline:
-    """Load a Whisper model for inference.
-    Args:
-        whisper_arch - The name of the Whisper model to load.
-        device - The device to load the model on.
-        compute_type - The compute type to use for the model.
-            Use "default" to automatically select based on device (float16 for GPU, float32 for CPU).
-        vad_model - The vad model to manually assign.
-        vad_method - The vad method to use. vad_model has a higher priority if it is not None.
-        options - A dictionary of options to use for the model.
-        language - The language of the model. (use English for now)
-        model - The WhisperModel instance to use.
-        download_root - The root directory to download the model to.
-        local_files_only - If `True`, avoid downloading the file and return the path to the local cached file if it exists.
-        threads - The number of cpu threads to use per worker, e.g. will be multiplied by num workers.
-    Returns:
-        A Whisper pipeline.
-    """
+) -> MlxWhisperPipeline:
+    """Load a Whisper model for inference via mlx-whisper.
 
-    if compute_type == "default":
-        compute_type = "float16" if device == "cuda" else "float32"
-        logger.info(f"Compute type not specified, defaulting to {compute_type} for device {device}")
+    Args:
+        whisper_arch: Whisper model alias (tiny/base/small/medium/large/large-v2/
+            large-v3/large-v3-turbo/turbo) or an mlx-community repo / local path.
+        device: ignored. mlx-whisper always runs on the Apple Silicon GPU.
+        device_index: ignored.
+        compute_type: ignored. mlx-whisper uses the model's quantization as-is.
+        asr_options: dict overriding default ASR options (see below).
+        language: spoken language; None enables per-auto-detection.
+        vad_model: manually assigned VAD (overrides vad_method).
+        vad_method: "pyannote" or "silero".
+        vad_options: dict overriding VAD defaults (chunk_size, vad_onset, vad_offset).
+        model: ignored (kept for API compatibility).
+        task: "transcribe" or "translate".
+        download_root: ignored (mlx-whisper uses the HF cache).
+        local_files_only: if True, mlx-whisper is restricted to cached models.
+        threads: ignored by mlx-whisper.
+        use_auth_token: Hugging Face token for gated mlx-community models.
+
+    Returns:
+        An MlxWhisperPipeline.
+    """
+    if device == "cuda":
+        logger.warning(
+            "device='cuda' requested but mlx-whisper runs on Apple Silicon GPU; ignoring"
+        )
+    if compute_type != "default":
+        logger.info(
+            "compute_type=%s ignored; mlx-whisper uses the model's quantization",
+            compute_type,
+        )
 
     if whisper_arch.endswith(".en"):
         language = "en"
 
-    model = model or WhisperModel(whisper_arch,
-                         device=device,
-                         device_index=device_index,
-                         compute_type=compute_type,
-                         download_root=download_root,
-                         local_files_only=local_files_only,
-                         cpu_threads=threads,
-                         use_auth_token=use_auth_token)
-    if language is not None:
-        tokenizer = Tokenizer(model.hf_tokenizer, model.model.is_multilingual, task=task, language=language)
-    else:
-        logger.info("No language specified, language will be detected for each audio file (increases inference time)")
-        tokenizer = None
+    model_path = _resolve_model_path(whisper_arch)
 
-    default_asr_options =  {
+    default_asr_options = {
         "beam_size": 5,
         "best_of": 5,
         "patience": 1,
@@ -390,7 +243,7 @@ def load_model(
         "word_timestamps": False,
         "prepend_punctuations": "\"'“¿([{-",
         "append_punctuations": "\"'.。,，!！?？:：”)]}、",
-        "multilingual": model.model.is_multilingual,
+        "multilingual": True,
         "suppress_numerals": False,
         "max_new_tokens": None,
         "clip_timestamps": None,
@@ -401,42 +254,75 @@ def load_model(
     if asr_options is not None:
         default_asr_options.update(asr_options)
 
-    suppress_numerals = default_asr_options["suppress_numerals"]
-    del default_asr_options["suppress_numerals"]
+    suppress_numerals = default_asr_options.pop("suppress_numerals", False)
+    default_asr_options.pop("multilingual", None)
 
-    default_asr_options = TranscriptionOptions(**default_asr_options)
+    # mlx-whisper has no beam search decoder: beam_size, patience, best_of,
+    # length_penalty are dropped. Temperature tuple kept for fallback.
+    temperatures = default_asr_options.get("temperatures", [0.0])
+    temperature = tuple(temperatures) if len(temperatures) > 1 else temperatures[0]
+
+    mlx_options = {
+        "temperature": temperature,
+        "compression_ratio_threshold": default_asr_options.get(
+            "compression_ratio_threshold"
+        ),
+        "logprob_threshold": default_asr_options.get("log_prob_threshold"),
+        "no_speech_threshold": default_asr_options.get("no_speech_threshold"),
+        "condition_on_previous_text": default_asr_options.get(
+            "condition_on_previous_text"
+        ),
+        "initial_prompt": default_asr_options.get("initial_prompt"),
+        "word_timestamps": default_asr_options.get("word_timestamps"),
+        "prepend_punctuations": default_asr_options.get("prepend_punctuations"),
+        "append_punctuations": default_asr_options.get("append_punctuations"),
+        "clip_timestamps": default_asr_options.get("clip_timestamps") or "0",
+        "hallucination_silence_threshold": default_asr_options.get(
+            "hallucination_silence_threshold"
+        ),
+        "verbose": False,
+    }
+    # Drop None-valued options so mlx-whisper applies its own defaults.
+    mlx_options = {k: v for k, v in mlx_options.items() if v is not None}
+
+    suppress_tokens = default_asr_options.get("suppress_tokens", [-1])
+    if suppress_numerals:
+        tokenizer = WhisperTokenizer.from_pretrained(model_path)
+        numeral_symbol_tokens = find_numeral_symbol_tokens(tokenizer)
+        logger.info("Suppressing numeral and symbol tokens")
+        suppress_tokens = list(set(numeral_symbol_tokens + suppress_tokens))
 
     default_vad_options = {
-        "chunk_size": 30, # needed by silero since binarization happens before merge_chunks
+        "chunk_size": 30,
         "vad_onset": 0.500,
-        "vad_offset": 0.363
+        "vad_offset": 0.363,
     }
-
     if vad_options is not None:
         default_vad_options.update(vad_options)
 
-    # Note: manually assigned vad_model has higher priority than vad_method!
+    # Manually assigned vad_model has higher priority than vad_method.
     if vad_model is not None:
-        print("Use manually assigned vad_model. vad_method is ignored.")
-        vad_model = vad_model
+        logger.info("Using manually assigned vad_model; vad_method ignored")
+    elif vad_method == "silero":
+        vad_model = Silero(**default_vad_options)
+    elif vad_method == "pyannote":
+        # mlx-whisper ignores device; pyannote VAD runs on torch (CPU on Apple
+        # Silicon for now).
+        device_vad = "cpu"
+        vad_model = Pyannote(
+            torch.device(device_vad),
+            token=use_auth_token,
+            **default_vad_options,
+        )
     else:
-        if vad_method == "silero":
-            vad_model = Silero(**default_vad_options)
-        elif vad_method == "pyannote":
-            if device == 'cuda':
-                device_vad = f'cuda:{device_index}'
-            else:
-                device_vad = device
-            vad_model = Pyannote(torch.device(device_vad), token=None, **default_vad_options)
-        else:
-            raise ValueError(f"Invalid vad_method: {vad_method}")
+        raise ValueError(f"Invalid vad_method: {vad_method}")
 
-    return FasterWhisperPipeline(
-        model=model,
+    return MlxWhisperPipeline(
+        model_path=model_path,
         vad=vad_model,
-        options=default_asr_options,
-        tokenizer=tokenizer,
+        vad_params=default_vad_options,
+        mlx_options=mlx_options,
         language=language,
         suppress_numerals=suppress_numerals,
-        vad_params=default_vad_options,
+        suppress_tokens=suppress_tokens,
     )

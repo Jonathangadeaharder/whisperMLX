@@ -13,13 +13,13 @@ def cli():
     # fmt: off
     parser = argparse.ArgumentParser(formatter_class=argparse.ArgumentDefaultsHelpFormatter)
     parser.add_argument("audio", nargs="+", type=str, help="audio file(s) to transcribe")
-    parser.add_argument("--model", default="small", help="name of the Whisper model to use")
+    parser.add_argument("--model", default="small", help="name of the Whisper model to use (alias like 'small' resolves to mlx-community/whisper-small; pass an mlx-community repo or local path to override)")
     parser.add_argument("--model_cache_only", type=str2bool, default=False, help="If True, will not attempt to download models, instead using cached models from --model_dir")
     parser.add_argument("--model_dir", type=str, default=None, help="the path to save model files; uses ~/.cache/whisper by default")
-    parser.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu", help="device type to use for PyTorch inference (e.g. cpu, cuda)")
-    parser.add_argument("--device_index", default=0, type=int, help="device index to use for FasterWhisper inference")
-    parser.add_argument("--batch_size", default=8, type=int, help="the preferred batch size for inference")
-    parser.add_argument("--compute_type", default="default", type=str, choices=["default", "float16", "float32", "int8"], help="compute type for computation; 'default' uses float16 on GPU, float32 on CPU")
+    parser.add_argument("--device", default="mps", help="device hint for VAD/align/diarize (mlx-whisper ASR always runs on the Apple Silicon GPU); common values: cpu, mps")
+    parser.add_argument("--device_index", default=0, type=int, help="device index (ignored by mlx-whisper; kept for CLI compatibility)")
+    parser.add_argument("--batch_size", default=8, type=int, help="ignored: mlx-whisper transcribes one VAD segment at a time (kept for CLI compatibility)")
+    parser.add_argument("--compute_type", default="default", type=str, choices=["default", "float16", "float32", "int8"], help="ignored: mlx-whisper uses the model's quantization as-is (kept for CLI compatibility)")
 
     parser.add_argument("--output_dir", "-o", type=str, default=".", help="directory to save the outputs")
     parser.add_argument("--output_format", "-f", type=str, default="all", choices=["all", "srt", "vtt", "txt", "tsv", "json", "aud"], help="format of the output file; if not specified, all available formats will be produced")
@@ -77,7 +77,7 @@ def cli():
     parser.add_argument("--hf_token", type=str, default=None, help="Hugging Face Access Token to access PyAnnote gated models")
 
     parser.add_argument("--print_progress", type=str2bool, default = False, help = "if True, progress will be printed in transcribe() and align() methods.")
-    parser.add_argument("--version", "-V", action="version", version=f"%(prog)s {importlib.metadata.version('whisperx')}",help="Show whisperx version information and exit")
+    parser.add_argument("--version", "-V", action="version", version=f"%(prog)s {importlib.metadata.version('whispermlx')}",help="Show whispermlx version information and exit")
     parser.add_argument("--python-version", "-P", action="version", version=f"Python {platform.python_version()} ({platform.python_implementation()})",help="Show python version information and exit")
     # fmt: on
 
