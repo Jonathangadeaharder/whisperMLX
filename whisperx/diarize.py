@@ -1,8 +1,7 @@
 import numpy as np
 import pandas as pd
-from pyannote.audio import Pipeline
 from typing import Optional, Union, List, Tuple
-import torch
+from sklearn.cluster import AgglomerativeClustering
 
 from whisperx.audio import load_audio, SAMPLE_RATE
 from whisperx.schema import TranscriptionResult, AlignedTranscriptionResult, ProgressCallback
@@ -12,56 +11,30 @@ logger = get_logger(__name__)
 
 
 class IntervalTree:
-    """
-    Simple interval tree for fast overlap queries using sorted array + binary search.
+    """Interval tree for fast overlap queries via sorted array + binary search.
 
-    Uses O(n) space and provides O(log n) query time instead of O(n) linear scan.
-    This achieves ~228x speedup for speaker assignment in long-form content.
+    O(n) space, O(log n) query time instead of O(n) linear scan.
     """
 
     def __init__(self, intervals: List[Tuple[float, float, str]]):
-        """
-        Initialize the interval tree with diarization segments.
-
-        Args:
-            intervals: List of (start, end, speaker) tuples
-        """
         if not intervals:
             self.starts = np.array([])
             self.ends = np.array([])
             self.speakers: List[str] = []
             return
-
-        # Sort intervals by start time for binary search
         sorted_intervals = sorted(intervals, key=lambda x: x[0])
         self.starts = np.array([i[0] for i in sorted_intervals], dtype=np.float64)
         self.ends = np.array([i[1] for i in sorted_intervals], dtype=np.float64)
         self.speakers = [i[2] for i in sorted_intervals]
 
     def query(self, start: float, end: float) -> List[Tuple[str, float]]:
-        """
-        Find all intervals that overlap with [start, end] and compute intersection.
-
-        Args:
-            start: Query interval start time
-            end: Query interval end time
-
-        Returns:
-            List of (speaker, intersection_duration) tuples for overlapping segments
-        """
         if len(self.starts) == 0:
             return []
-
-        # Binary search to find candidate intervals
-        # Only intervals with start < end could overlap
         right_idx = np.searchsorted(self.starts, end, side='left')
         if right_idx == 0:
             return []
-
-        # Check candidates for actual overlap
         candidates = slice(0, right_idx)
         overlaps = (self.starts[candidates] < end) & (self.ends[candidates] > start)
-
         results = []
         for idx in np.where(overlaps)[0]:
             intersection = min(self.ends[idx], end) - max(self.starts[idx], start)
@@ -70,37 +43,51 @@ class IntervalTree:
         return results
 
     def find_nearest(self, time: float) -> Optional[str]:
-        """
-        Find the speaker of the nearest segment to a given time point.
-
-        Args:
-            time: Time point to find nearest segment for
-
-        Returns:
-            Speaker ID of nearest segment, or None if no segments exist
-        """
         if len(self.starts) == 0:
             return None
-
-        # Calculate midpoints of all segments
         mids = (self.starts + self.ends) / 2
         nearest_idx = np.argmin(np.abs(mids - time))
         return self.speakers[nearest_idx]
 
 
 class DiarizationPipeline:
+    """MLX diarization: segmentation + WeSpeaker embeddings + clustering.
+
+    Replaces pyannote.audio.Pipeline. Uses the MLX pyannote segmentation
+    (phase 4) for speech regions and MLX WeSpeaker ResNet34 for 256-dim
+    speaker embeddings, clustered via sklearn AgglomerativeClustering.
+    """
+
     def __init__(
         self,
         model_name=None,
         token=None,
-        device: Optional[Union[str, torch.device]] = "cpu",
+        device=None,
         cache_dir=None,
     ):
-        if isinstance(device, str):
-            device = torch.device(device)
-        model_config = model_name or "pyannote/speaker-diarization-community-1"
-        logger.info(f"Loading diarization model: {model_config}")
-        self.model = Pipeline.from_pretrained(model_config, token=token, cache_dir=cache_dir).to(device)
+        import mlx.core as mx
+        from whisperx.mlx_models.pyannote_segmentation import segment_audio
+        from whisperx.mlx_models.wespeaker import embed, _load_weights as load_ws
+        logger.info("Loading MLX diarization pipeline (segmentation + WeSpeaker)...")
+        self._segment_audio = segment_audio
+        self._embed = embed
+        self._wespeaker_weights = load_ws()
+        # Segmentation produces speech prob per frame; binarize with onset/offset.
+        self.vad_onset = 0.5
+        self.vad_offset = 0.363
+
+    def _binarize_segments(self, scores, frame_times):
+        """Hysteresis thresholding -> speech segments."""
+        from whisperx.vads.pyannote import _Binarize
+        binarize = _Binarize(
+            onset=self.vad_onset,
+            offset=self.vad_offset,
+            min_duration_on=0.1,
+            min_duration_off=0.1,
+            max_duration=30.0,
+        )
+        segments = binarize(scores, frame_times)
+        return [(float(s.start), float(s.end)) for s in segments]
 
     def __call__(
         self,
@@ -111,75 +98,149 @@ class DiarizationPipeline:
         return_embeddings: bool = False,
         progress_callback: ProgressCallback = None,
     ) -> Union[tuple[pd.DataFrame, Optional[dict[str, list[float]]]], pd.DataFrame]:
-        """
-        Perform speaker diarization on audio.
+        """Perform speaker diarization on audio.
 
-        Args:
-            audio: Path to audio file or audio array
-            num_speakers: Exact number of speakers (if known)
-            min_speakers: Minimum number of speakers to detect
-            max_speakers: Maximum number of speakers to detect
-            return_embeddings: Whether to return speaker embeddings
-            progress_callback: Optional callable receiving a float (0-100) with progress percentage
-
-        Returns:
-            If return_embeddings is True:
-                Tuple of (diarization dataframe, speaker embeddings dictionary)
-            Otherwise:
-                Just the diarization dataframe
+        Returns diarization dataframe, optionally with speaker embeddings.
         """
+        import mlx.core as mx
+
         if isinstance(audio, str):
             audio = load_audio(audio)
-        audio_data = {
-            'waveform': torch.from_numpy(audio[None, :]),
-            'sample_rate': SAMPLE_RATE
-        }
+        audio_mx = mx.array(audio, dtype=mx.float32)
 
-        hook = None
+        # 1. Segmentation -> speech regions.
+        scores, frame_times = self._segment_audio(audio_mx)
+        scores_np = np.array(scores)
+        frame_times_np = np.array(frame_times)
+        speech_segments = self._binarize_segments(scores_np, frame_times_np)
+
+        if not speech_segments:
+            logger.warning("No speech segments found for diarization.")
+            empty_df = pd.DataFrame(columns=['segment', 'label', 'speaker', 'start', 'end'])
+            return (empty_df, None) if return_embeddings else empty_df
+
         if progress_callback is not None:
-            # pyannote's diarization has two progress-trackable steps, each with
-            # its own completed/total counter that resets between steps. Map each
-            # step into a sub-range so progress is monotonic and meaningful.
-            _STEP_RANGES = {
-                "segmentation": (0.0, 50.0),
-                "embeddings": (50.0, 99.0),
-            }
-            last_pct = [0.0]
-            def hook(step_name, step_artifact, file=None, total=None, completed=None):
-                if total is not None and completed is not None and total > 0:
-                    offset, end = _STEP_RANGES.get(step_name, (0.0, 99.0))
-                    pct = offset + min(completed / total, 1.0) * (end - offset)
-                    if pct > last_pct[0]:
-                        last_pct[0] = pct
-                        progress_callback(pct)
+            progress_callback(50.0)
 
-        output = self.model(
-            audio_data,
-            num_speakers=num_speakers,
-            min_speakers=min_speakers,
-            max_speakers=max_speakers,
-            **({"hook": hook} if hook is not None else {}),
+        # 2. Extract WeSpeaker embedding per speech sub-segment.
+        # Split long segments into 3s windows with 1s step so we get
+        # multiple embeddings per speaker for clustering.
+        EMB_WINDOW = 3.0
+        EMB_STEP = 1.0
+        embeddings = []
+        seg_info = []
+        for start, end in speech_segments:
+            dur = end - start
+            if dur < EMB_WINDOW:
+                f1 = max(0, int(start * SAMPLE_RATE))
+                f2 = min(len(audio), int(end * SAMPLE_RATE))
+                if f2 - f1 < SAMPLE_RATE * 0.3:
+                    continue
+                seg_audio = audio_mx[f1:f2]
+                emb = self._embed(seg_audio, weights=self._wespeaker_weights)
+                embeddings.append(np.array(emb))
+                seg_info.append((start, end))
+                continue
+            n_windows = int((dur - EMB_WINDOW) / EMB_STEP) + 1
+            for w in range(n_windows):
+                w_start = start + w * EMB_STEP
+                w_end = w_start + EMB_WINDOW
+                if w_end > end:
+                    w_end = end
+                if w_end - w_start < 0.5:
+                    break
+                f1 = int(w_start * SAMPLE_RATE)
+                f2 = int(w_end * SAMPLE_RATE)
+                seg_audio = audio_mx[f1:f2]
+                emb = self._embed(seg_audio, weights=self._wespeaker_weights)
+                embeddings.append(np.array(emb))
+                seg_info.append((w_start, w_end))
+
+        if not embeddings:
+            logger.warning("No segments long enough for embedding extraction.")
+            empty_df = pd.DataFrame(columns=['segment', 'label', 'speaker', 'start', 'end'])
+            return (empty_df, None) if return_embeddings else empty_df
+
+        embeddings = np.array(embeddings)
+
+        if progress_callback is not None:
+            progress_callback(80.0)
+
+        # 3. Cluster embeddings.
+        n = len(embeddings)
+        if num_speakers is not None:
+            n_clusters = min(num_speakers, n)
+        elif min_speakers is not None and max_speakers is not None:
+            n_clusters = self._estimate_clusters(
+                embeddings, min_speakers, max_speakers
+            )
+        elif max_speakers is not None:
+            n_clusters = self._estimate_clusters(embeddings, 1, max_speakers)
+        else:
+            n_clusters = self._estimate_clusters(embeddings, 1, min(n, 8))
+
+        n_clusters = max(1, min(n_clusters, n))
+        clustering = AgglomerativeClustering(
+            n_clusters=n_clusters,
+            metric='cosine',
+            linkage='average',
         )
+        labels = clustering.fit_predict(embeddings)
 
         if progress_callback is not None:
             progress_callback(100.0)
 
-        diarization = output.speaker_diarization
-        embeddings = output.speaker_embeddings if return_embeddings else None
+        # 4. Build dataframe.
+        rows = []
+        for i, (start, end) in enumerate(seg_info):
+            speaker = f"SPEAKER_{labels[i]:02d}"
+            seg_obj = Segment(start, end, speaker)
+            rows.append({
+                'segment': seg_obj,
+                'label': labels[i],
+                'speaker': speaker,
+                'start': start,
+                'end': end,
+            })
+        diarize_df = pd.DataFrame(rows)
 
-        diarize_df = pd.DataFrame(diarization.itertracks(yield_label=True), columns=['segment', 'label', 'speaker'])
-        diarize_df['start'] = diarize_df['segment'].apply(lambda x: x.start)
-        diarize_df['end'] = diarize_df['segment'].apply(lambda x: x.end)
-
-        if return_embeddings and embeddings is not None:
-            speaker_embeddings = {speaker: embeddings[s].tolist() for s, speaker in enumerate(diarization.labels())}
-            return diarize_df, speaker_embeddings
-        
-        # For backwards compatibility
         if return_embeddings:
-            return diarize_df, None
-        else:
-            return diarize_df
+            speaker_embeddings = {}
+            for spk_label in sorted(set(labels)):
+                mask = labels == spk_label
+                mean_emb = embeddings[mask].mean(axis=0)
+                speaker_embeddings[f"SPEAKER_{spk_label:02d}"] = mean_emb.tolist()
+            return diarize_df, speaker_embeddings
+
+        return diarize_df
+
+    @staticmethod
+    def _estimate_clusters(embeddings, min_s, max_s):
+        """Pick cluster count via cosine-distance gap heuristic."""
+        from scipy.cluster.hierarchy import linkage, fcluster
+        from scipy.spatial.distance import pdist
+        dists = pdist(embeddings, metric='cosine')
+        if len(dists) == 0:
+            return min_s
+        Z = linkage(dists, method='average')
+        best_n = min_s
+        best_score = -1.0
+        for n in range(min_s, min(max_s, len(embeddings)) + 1):
+            labels = fcluster(Z, t=n, criterion='maxclust')
+            # Silhouette-like: mean intra-cluster cosine sim.
+            sims = []
+            for c in set(labels):
+                mask = labels == c
+                if mask.sum() < 2:
+                    continue
+                cluster_embs = embeddings[mask]
+                sim = cluster_embs @ cluster_embs.T
+                sims.append(sim.mean())
+            score = np.mean(sims) if sims else 0.0
+            if score > best_score:
+                best_score = score
+                best_n = n
+        return best_n
 
 
 def assign_word_speakers(
@@ -188,26 +249,14 @@ def assign_word_speakers(
     speaker_embeddings: Optional[dict[str, list[float]]] = None,
     fill_nearest: bool = False,
 ) -> Union[AlignedTranscriptionResult, TranscriptionResult]:
-    """
-    Assign speakers to words and segments in the transcript.
+    """Assign speakers to words and segments in the transcript.
 
-    Uses an interval tree for O(log n) overlap queries instead of O(n) linear scan,
-    achieving ~228x speedup for long-form content (3+ hour podcasts).
-
-    Args:
-        diarize_df: Diarization dataframe from DiarizationPipeline
-        transcript_result: Transcription result to augment with speaker labels
-        speaker_embeddings: Optional dictionary mapping speaker IDs to embedding vectors
-        fill_nearest: If True, assign speakers even when there's no direct time overlap
-
-    Returns:
-        Updated transcript_result with speaker assignments and optionally embeddings
+    Uses an interval tree for O(log n) overlap queries.
     """
     transcript_segments = transcript_result.get("segments", [])
     if not transcript_segments or diarize_df is None or len(diarize_df) == 0:
         return transcript_result
 
-    # Build interval tree from diarization segments for O(log n) queries
     intervals = [
         (row['start'], row['end'], row['speaker'])
         for _, row in diarize_df.iterrows()
@@ -218,33 +267,26 @@ def assign_word_speakers(
         seg_start = seg.get('start', 0.0)
         seg_end = seg.get('end', 0.0)
 
-        # Query overlapping segments using interval tree
         overlaps = tree.query(seg_start, seg_end)
 
         if overlaps:
-            # Sum intersection durations per speaker and pick the dominant one
             speaker_intersections: dict[str, float] = {}
             for speaker, intersection in overlaps:
                 speaker_intersections[speaker] = speaker_intersections.get(speaker, 0.0) + intersection
             seg['speaker'] = max(speaker_intersections.items(), key=lambda x: x[1])[0]
         elif fill_nearest:
-            # Find nearest segment if no overlap
             seg_mid = (seg_start + seg_end) / 2
             nearest_speaker = tree.find_nearest(seg_mid)
             if nearest_speaker:
                 seg['speaker'] = nearest_speaker
 
-        # Assign speaker to words
         if 'words' in seg:
             for word in seg['words']:
                 if 'start' not in word:
                     continue
-
                 word_start = word['start']
                 word_end = word.get('end', word_start)
-
                 word_overlaps = tree.query(word_start, word_end)
-
                 if word_overlaps:
                     speaker_intersections = {}
                     for speaker, intersection in word_overlaps:
@@ -256,7 +298,6 @@ def assign_word_speakers(
                     if nearest_speaker:
                         word['speaker'] = nearest_speaker
 
-    # Add speaker embeddings to the result if provided
     if speaker_embeddings is not None:
         transcript_result["speaker_embeddings"] = speaker_embeddings
 
@@ -264,7 +305,7 @@ def assign_word_speakers(
 
 
 class Segment:
-    def __init__(self, start:int, end:int, speaker:Optional[str]=None):
+    def __init__(self, start: int, end: int, speaker: Optional[str] = None):
         self.start = start
         self.end = end
         self.speaker = speaker
