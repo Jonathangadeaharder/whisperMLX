@@ -131,7 +131,7 @@ def _load_weights():
     path = hf_hub_download("aufklarer/WeSpeaker-ResNet34-LM-MLX", "model.safetensors")
     weights = {}
     with safe_open(path, framework="np") as f:
-        for k in f:
+        for k in f.keys():  # noqa: SIM118
             weights[k] = mx.array(f.get_tensor(k))
     return weights
 

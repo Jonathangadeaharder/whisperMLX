@@ -157,11 +157,10 @@ skip_covered = false
 source = ["whisperx/"]
 
 [tool.mutmut]
-paths_to_mutate = ["whisperx"]
-tests_dir = ["tests"]
+source_paths = ["whisperx"]
 do_not_mutate = [
     "whisperx/__main__.py",
     "whisperx/mlx_models/__init__.py",
 ]
-runner = "uv run pytest -x -q --no-cov"
+runner = "uv run pytest -x -q --no-cov -m 'not e2e'"
 minimum_mutation_score = 80

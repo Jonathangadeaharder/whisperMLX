@@ -58,7 +58,7 @@ def _load_weights():
     path = os.path.abspath(path)
     weights = {}
     with safe_open(path, framework="np") as f:
-        for k in f.keys():
+        for k in f.keys():  # noqa: SIM118
             weights[k] = mx.array(f.get_tensor(k))
     return weights
 

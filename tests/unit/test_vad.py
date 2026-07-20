@@ -44,6 +44,8 @@ class TestMergeChunks:
         assert len(merged) == 1
         assert merged[0]["start"] == 0.0
         assert merged[0]["end"] == 3.0
+        # Vad.merge_chunks returns untyped dict; "segments" is a list at
+        # runtime but pyrefly infers a union with the int "start"/"end" values.
         assert len(merged[0]["segments"]) == 3  # pyrefly: ignore[bad-argument-type]
 
     def test_split_when_chunk_size_exceeded(self, make_segments):

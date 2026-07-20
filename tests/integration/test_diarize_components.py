@@ -142,6 +142,7 @@ class TestAssignWordSpeakersIntegration:
             "word_segments": [],
         }
         out = assign_word_speakers(df, result)
+        # Return type is the union; runtime variant is the aligned form.
         aligned: AlignedTranscriptionResult = out  # pyrefly: ignore[bad-assignment]
         assert out["segments"][0]["speaker"] == "SPEAKER_00"
         assert out["segments"][1]["speaker"] == "SPEAKER_01"

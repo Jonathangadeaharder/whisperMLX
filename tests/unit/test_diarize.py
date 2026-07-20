@@ -18,7 +18,6 @@ from whisperx.diarize import (
 )
 from whisperx.schema import (
     AlignedTranscriptionResult,
-    SingleSegment,
     TranscriptionResult,
 )
 
@@ -100,75 +99,104 @@ class TestAssignWordSpeakers:
         assert out is result
 
     def test_none_df_returns_unchanged(self):
-        result = {"segments": [{"start": 0.0, "end": 1.0, "text": "hi"}]}
+        # None df exercises the early-return guard; typed as the union param.
+        result: TranscriptionResult = {
+            "segments": [{"start": 0.0, "end": 1.0, "text": "hi"}],
+            "language": "en",
+        }
         out = assign_word_speakers(None, result)  # pyrefly: ignore[bad-argument-type]
         assert out is result
 
     def test_assigns_segment_speaker_by_overlap(self):
         df = self._diarize_df([(0.0, 1.0, "SPEAKER_00")])
-        result = {"segments": [{"start": 0.1, "end": 0.9, "text": "hello"}]}
-        out = assign_word_speakers(df, result)  # pyrefly: ignore[bad-argument-type]
+        result: TranscriptionResult = {
+            "segments": [{"start": 0.1, "end": 0.9, "text": "hello"}],
+            "language": "en",
+        }
+        out = assign_word_speakers(df, result)
         assert out["segments"][0]["speaker"] == "SPEAKER_00"
 
     def test_assigns_word_speakers(self):
         df = self._diarize_df([(0.0, 0.5, "SPEAKER_00"), (0.5, 1.0, "SPEAKER_01")])
-        result = {
+        result: AlignedTranscriptionResult = {
             "segments": [
                 {
                     "start": 0.0,
                     "end": 1.0,
                     "text": "hello world",
                     "words": [
-                        {"word": "hello", "start": 0.0, "end": 0.4},
-                        {"word": "world", "start": 0.6, "end": 1.0},
+                        {"word": "hello", "start": 0.0, "end": 0.4, "score": 1.0},
+                        {"word": "world", "start": 0.6, "end": 1.0, "score": 1.0},
                     ],
+                    "chars": None,
                 }
-            ]
+            ],
+            "word_segments": [],
         }
-        out = assign_word_speakers(df, result)  # pyrefly: ignore[bad-argument-type]
-        words = out["segments"][0]["words"]  # pyrefly: ignore[bad-typed-dict-key]
+        out = assign_word_speakers(df, result)
+        # Return type is the union; runtime variant is the aligned form.
+        aligned: AlignedTranscriptionResult = out  # pyrefly: ignore[bad-assignment]
+        words = aligned["segments"][0]["words"]
         assert words[0]["speaker"] == "SPEAKER_00"
         assert words[1]["speaker"] == "SPEAKER_01"
 
     def test_fill_nearest_when_no_overlap(self):
         df = self._diarize_df([(0.0, 1.0, "SPEAKER_00")])
-        result = {"segments": [{"start": 2.0, "end": 3.0, "text": "later"}]}
-        out = assign_word_speakers(df, result, fill_nearest=True)  # pyrefly: ignore[bad-argument-type]
+        result: TranscriptionResult = {
+            "segments": [{"start": 2.0, "end": 3.0, "text": "later"}],
+            "language": "en",
+        }
+        out = assign_word_speakers(df, result, fill_nearest=True)
         assert out["segments"][0]["speaker"] == "SPEAKER_00"
 
     def test_no_fill_nearest_leaves_speaker_unset(self):
         df = self._diarize_df([(0.0, 1.0, "SPEAKER_00")])
-        result = {"segments": [{"start": 5.0, "end": 6.0, "text": "later"}]}
-        out = assign_word_speakers(df, result, fill_nearest=False)  # pyrefly: ignore[bad-argument-type]
+        result: TranscriptionResult = {
+            "segments": [{"start": 5.0, "end": 6.0, "text": "later"}],
+            "language": "en",
+        }
+        out = assign_word_speakers(df, result, fill_nearest=False)
         assert "speaker" not in out["segments"][0]
 
     def test_word_without_start_skipped(self):
         df = self._diarize_df([(0.0, 1.0, "SPEAKER_00")])
-        result = {
+        # Word deliberately omits start/end to test the skip path; would not
+        # satisfy SingleWordSegment, so suppress the TypedDict check here.
+        result: AlignedTranscriptionResult = {
             "segments": [
                 {
                     "start": 0.0,
                     "end": 1.0,
                     "text": "hi",
-                    "words": [{"word": "hi"}],  # no start
+                    "words": [{"word": "hi"}],  # pyrefly: ignore[bad-typed-dict-key]
+                    "chars": None,
                 }
-            ]
+            ],
+            "word_segments": [],
         }
-        out = assign_word_speakers(df, result)  # pyrefly: ignore[bad-argument-type]
-        assert "speaker" not in out["segments"][0]["words"][0]  # pyrefly: ignore[bad-typed-dict-key]
+        out = assign_word_speakers(df, result)
+        # Return type is the union; runtime variant is the aligned form.
+        aligned2: AlignedTranscriptionResult = out  # pyrefly: ignore[bad-assignment]
+        assert "speaker" not in aligned2["segments"][0]["words"][0]
 
     def test_speaker_embeddings_attached(self):
         df = self._diarize_df([(0.0, 1.0, "SPEAKER_00")])
-        result = {"segments": [{"start": 0.0, "end": 1.0, "text": "hi"}]}
+        result: TranscriptionResult = {
+            "segments": [{"start": 0.0, "end": 1.0, "text": "hi"}],
+            "language": "en",
+        }
         emb = {"SPEAKER_00": [0.1, 0.2]}
-        out = assign_word_speakers(df, result, speaker_embeddings=emb)  # pyrefly: ignore[bad-argument-type]
+        out = assign_word_speakers(df, result, speaker_embeddings=emb)
         assert out["speaker_embeddings"] == emb
 
     def test_dominant_speaker_chosen_on_overlap(self):
         # Two speakers overlap a segment; the one with the larger intersection wins.
         df = self._diarize_df([(0.0, 0.4, "SPEAKER_00"), (0.1, 1.0, "SPEAKER_01")])
-        result = {"segments": [{"start": 0.1, "end": 1.0, "text": "hi"}]}
-        out = assign_word_speakers(df, result)  # pyrefly: ignore[bad-argument-type]
+        result: TranscriptionResult = {
+            "segments": [{"start": 0.1, "end": 1.0, "text": "hi"}],
+            "language": "en",
+        }
+        out = assign_word_speakers(df, result)
         assert out["segments"][0]["speaker"] == "SPEAKER_01"
 
 

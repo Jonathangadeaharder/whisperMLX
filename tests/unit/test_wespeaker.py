@@ -212,8 +212,8 @@ class TestLoadWeights:
             def __exit__(self, *a):
                 return False
 
-            def __iter__(self):
-                return iter([])
+            def keys(self):
+                return []
 
             def get_tensor(self, k):
                 return np.zeros((1,), dtype=np.float32)
