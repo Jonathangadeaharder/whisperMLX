@@ -165,11 +165,6 @@ else:
         return string
 
 
-def exact_div(x, y):
-    assert x % y == 0
-    return x // y
-
-
 def str2bool(string):
     str2val = {"True": True, "False": False}
     if string in str2val:
