@@ -30,7 +30,7 @@ jobs:
         run: uv run mutmut results
       - name: Open issue on low score
         if: failure()
-        uses: actions/github-script@60a0d8302b8434c3785a5b8d82105392f3c399f0 # v7.0.1
+        uses: actions/github-script@60a0d83039c74a4aee543508d2ffcb1c3799cdea # v7.0.1
         with:
           script: |
             github.rest.issues.create({
