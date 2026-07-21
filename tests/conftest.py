@@ -26,8 +26,10 @@ if sys.platform != "darwin":
         "unit/test_silero_vad.py",
         "unit/test_transcribe.py",
         "unit/test_vad.py",
+        "unit/test_vads_pyannote.py",
         "unit/test_vads_silero.py",
         "unit/test_wespeaker.py",
+        "integration/test_diarize_components.py",
         "integration/test_vad_asr_integration.py",
     ]
 import pytest
