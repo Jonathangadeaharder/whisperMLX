@@ -465,6 +465,10 @@ class TestDiarizationPipelineCall:
         assert len(out) == 0
 
 
+@pytest.mark.skipif(
+    sys.platform != "darwin",
+    reason="patch target whisperx.vads.pyannote requires mlx.core via __init__",
+)
 class TestBinarizeSegments:
     def test_returns_float_tuples(self, monkeypatch):
         pipe = DiarizationPipeline.__new__(DiarizationPipeline)
