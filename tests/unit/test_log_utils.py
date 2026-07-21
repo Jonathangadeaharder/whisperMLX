@@ -45,6 +45,10 @@ class TestSetupLogging:
         # console + file
         assert len(logger.handlers) == 2
         assert any(isinstance(h, logging.FileHandler) for h in logger.handlers)
+        # The file handler must have a formatter set (kills setFormatter->None).
+        file_h = next(h for h in logger.handlers if isinstance(h, logging.FileHandler))
+        assert isinstance(file_h.formatter, logging.Formatter)
+        assert file_h.formatter._fmt == _LOG_FORMAT
         logger.info("a message")
         for h in logger.handlers:
             h.flush()
@@ -52,12 +56,24 @@ class TestSetupLogging:
 
     def test_file_handler_failure_warns_and_continues(self, reset_logger_handlers, caplog):
         # A path inside a nonexistent directory triggers OSError on FileHandler.
+        # Enable propagation so caplog (root handler) captures the warnings
+        # emitted during setup_logging.
+        logging.getLogger("whisperx").propagate = True
         with caplog.at_level(logging.WARNING, logger="whisperx"):
             setup_logging(level="info", log_file="/nonexistent_dir_xyz/abc/out.log")
         logger = logging.getLogger("whisperx")
         # console handler still present despite file handler failure
         assert len(logger.handlers) == 1
         assert isinstance(logger.handlers[0], logging.StreamHandler)
+        # Assert the warning messages (kills string-literal mutants).
+        assert any("Failed to create log file" in r.getMessage() for r in caplog.records)
+        assert any("Continuing with console logging only" in r.getMessage() for r in caplog.records)
+
+    def test_default_level_is_info(self, reset_logger_handlers):
+        # setup_logging() with no level -> defaults to "info" -> INFO level.
+        setup_logging()
+        logger = logging.getLogger("whisperx")
+        assert logger.level == logging.INFO
 
     def test_formatter_uses_config(self, reset_logger_handlers):
         setup_logging(level="info")

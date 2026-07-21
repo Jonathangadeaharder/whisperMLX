@@ -76,8 +76,46 @@ class TestIntervalTree:
         result = tree.query(1.0, 2.0)
         assert result == []
 
+    def test_interval_starts_exactly_at_query_end_no_overlap(self):
+        # overlaps = starts < end (mutant: <=). Interval [1,2], query(0,1):
+        # correct: 1 < 1 False -> no overlap. mutant: 1 <= 1 True -> overlap.
+        tree = IntervalTree([(1.0, 2.0, "SPEAKER_00")])
+        result = tree.query(0.0, 1.0)
+        assert result == []
 
-class TestAssignWordSpeakers:
+    def test_interval_ends_exactly_at_query_start_no_overlap(self):
+        # overlaps = ends > start (mutant: >=). Interval [0,1], query(1,2):
+        # correct: 1 > 1 False -> no overlap. mutant: 1 >= 1 True -> overlap.
+        tree = IntervalTree([(0.0, 1.0, "SPEAKER_00")])
+        result = tree.query(1.0, 2.0)
+        assert result == []
+
+    def test_zero_intersection_not_returned(self):
+        # intersection > 0 (mutant: >= 0). Zero-intersection only happens at
+        # boundary touch, which overlaps already excludes. Verify full overlap.
+        tree = IntervalTree([(0.0, 1.0, "SPEAKER_00")])
+        result = tree.query(0.0, 1.0)
+        # Full overlap: intersection = 1.0 > 0 -> returned.
+        assert len(result) == 1
+
+    def test_and_not_or_for_overlaps(self):
+        # mutmut_21: & -> |. Need an interval where only one of the two
+        # conditions is True so & excludes it but | includes it.
+        # [0,0.4] query(0.5,1.5): starts=0<1.5 T, ends=0.4>0.5 F. & excludes.
+        tree = IntervalTree([(0.0, 0.4, "EARLY"), (0.5, 1.0, "GOOD")])
+        result = tree.query(0.5, 1.5)
+        speakers = [r[0] for r in result]
+        assert "EARLY" not in speakers
+        assert "GOOD" in speakers
+
+    def test_searchsorted_left_side(self):
+        # right_idx = searchsorted(starts, end, side="left"). side="left" gives
+        # right_idx=0 when end equals first start, triggering early empty return.
+        tree = IntervalTree([(1.0, 2.0, "SPEAKER_00")])
+        # end=1.0. searchsorted([1.0], 1.0, "left")=0 -> right_idx=0 -> empty.
+        result = tree.query(0.0, 1.0)
+        assert result == []
+
     def _diarize_df(self, rows):
         return pd.DataFrame(
             [

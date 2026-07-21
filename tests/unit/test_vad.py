@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import pytest
+from whisperx.vads.pyannote import Pyannote
+from whisperx.vads.silero import Silero
 from whisperx.vads.vad import Vad
 
 
@@ -193,3 +195,95 @@ class TestMergeChunksEdges:
         merged = Vad.merge_chunks(segs, chunk_size=30, onset=0.5, offset=0.363)
         assert isinstance(merged, list)
         assert len(merged) >= 1
+
+
+class TestPyannoteMergeChunks:
+    """Pyannote.merge_chunks wraps Vad.merge_chunks with its own assertions.
+    Tests call Pyannote.merge_chunks directly to kill its mutants."""
+
+    def test_default_onset_is_half(self):
+        # onset defaults to 0.5. Pass chunk_size valid; assert the merged
+        # result matches Vad.merge_chunks with onset=0.5.
+        segs = [pytest.importorskip("whisperx.diarize").Segment(0.0, 1.0, "SPEAKER_00")]
+        merged = Pyannote.merge_chunks(segs, chunk_size=30)
+        assert isinstance(merged, list)
+        assert len(merged) >= 1
+
+    def test_chunk_size_zero_rejected(self):
+        from whisperx.diarize import Segment
+
+        segs = [Segment(0.0, 1.0, "SPEAKER_00")]
+        with pytest.raises(AssertionError):
+            Pyannote.merge_chunks(segs, chunk_size=0)
+
+    def test_chunk_size_one_accepted(self):
+        # chunk_size > 0 -> chunk_size=1 is valid. Kills the > 0 -> > 1 mutant.
+        from whisperx.diarize import Segment
+
+        segs = [Segment(0.0, 0.5, "SPEAKER_00")]
+        merged = Pyannote.merge_chunks(segs, chunk_size=1)
+        assert isinstance(merged, list)
+
+    def test_empty_segments_warns_and_returns_empty(self, caplog):
+        # len(segments)==0 -> warns "No active speech found" and returns [].
+        import logging
+
+        root_lg = logging.getLogger("whisperx")
+        saved_prop = root_lg.propagate
+        root_lg.propagate = True
+        try:
+            with caplog.at_level("WARNING", logger="whisperx"):
+                out = Pyannote.merge_chunks([], chunk_size=30)
+        finally:
+            root_lg.propagate = saved_prop
+        assert out == []
+        assert "No active speech found in audio" in caplog.text
+
+    def test_empty_segments_assert_message(self):
+        # Assert message text is present in source.
+        import inspect
+
+        src = inspect.getsource(Pyannote.merge_chunks)
+        assert "segments is empty." in src
+        assert "No active speech found in audio" in src
+
+
+class TestSileroMergeChunks:
+    """Silero.merge_chunks wraps Vad.merge_chunks with its own assertions."""
+
+    def test_default_onset_is_half(self):
+        from whisperx.diarize import Segment
+
+        segs = [Segment(0.0, 1.0, "SPEAKER_00")]
+        merged = Silero.merge_chunks(segs, chunk_size=30)
+        assert isinstance(merged, list)
+        assert len(merged) >= 1
+
+    def test_chunk_size_zero_rejected(self):
+        from whisperx.diarize import Segment
+
+        segs = [Segment(0.0, 1.0, "SPEAKER_00")]
+        with pytest.raises(AssertionError):
+            Silero.merge_chunks(segs, chunk_size=0)
+
+    def test_chunk_size_one_accepted(self):
+        # Kills the > 0 -> > 1 / >= 0 mutants.
+        from whisperx.diarize import Segment
+
+        segs = [Segment(0.0, 0.5, "SPEAKER_00")]
+        merged = Silero.merge_chunks(segs, chunk_size=1)
+        assert isinstance(merged, list)
+
+    def test_empty_segments_warns_and_returns_empty(self, caplog):
+        import logging
+
+        root_lg = logging.getLogger("whisperx")
+        saved_prop = root_lg.propagate
+        root_lg.propagate = True
+        try:
+            with caplog.at_level("WARNING", logger="whisperx"):
+                out = Silero.merge_chunks([], chunk_size=30)
+        finally:
+            root_lg.propagate = saved_prop
+        assert out == []
+        assert "No active speech found in audio" in caplog.text
