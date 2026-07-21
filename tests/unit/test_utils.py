@@ -303,13 +303,15 @@ class TestWriteSRT:
 class TestGetWriter:
     def test_returns_txt_writer(self, tmp_path):
         w = get_writer("txt", str(tmp_path))
-        assert isinstance(w, WriteTXT)
+        assert w.extension == "txt"  # pyrefly: ignore[missing-attribute]
 
     def test_returns_srt_writer(self, tmp_path):
-        assert isinstance(get_writer("srt", str(tmp_path)), WriteSRT)
+        w = get_writer("srt", str(tmp_path))
+        assert w.extension == "srt"  # pyrefly: ignore[missing-attribute]
 
     def test_returns_aud_writer(self, tmp_path):
-        assert isinstance(get_writer("aud", str(tmp_path)), WriteAudacity)
+        w = get_writer("aud", str(tmp_path))
+        assert w.extension == "aud"  # pyrefly: ignore[missing-attribute]
 
     def test_all_writes_every_format(self, tmp_path):
         w = get_writer("all", str(tmp_path))
@@ -456,3 +458,613 @@ class TestMakeSafeNonUtf8:
             # Restore utf-8 binding for other tests.
             monkeypatch.setattr(utils_mod, "system_encoding", "utf-8")
             importlib.reload(utils_mod)
+
+
+# --- Exact-content assertions for writers and iterate_result ---------------
+# These kill default-value and content mutants by asserting exact output
+# strings rather than just substring presence.
+
+
+class TestWriteTXTExact:
+    def test_plain_text_lines_exact(self, tmp_path):
+        w = WriteTXT(str(tmp_path))
+        w(_result_plain(), "audio.wav", {})
+        lines = _read(tmp_path / "audio.txt").splitlines()
+        assert lines == ["hello world", "foo bar"]
+
+    def test_speaker_prefix_exact(self, tmp_path):
+        w = WriteTXT(str(tmp_path))
+        w(_result_with_words(), "audio.wav", {})
+        lines = _read(tmp_path / "audio.txt").splitlines()
+        assert lines == ["[SPEAKER_00]: hello world"]
+
+
+class TestWriteTSVExact:
+    def test_exact_header_and_rows(self, tmp_path):
+        w = WriteTSV(str(tmp_path))
+        w(_result_plain(), "audio.wav", {})
+        lines = _read(tmp_path / "audio.tsv").splitlines()
+        assert lines[0] == "start\tend\ttext"
+        assert lines[1] == "0\t1000\thello world"
+        assert lines[2] == "1000\t2000\tfoo bar"
+
+    def test_text_tab_replaced_with_space(self, tmp_path):
+        result = {
+            "language": "en",
+            "segments": [{"start": 0.0, "end": 1.0, "text": "a\tb"}],
+        }
+        w = WriteTSV(str(tmp_path))
+        w(result, "audio.wav", {})
+        line = _read(tmp_path / "audio.tsv").splitlines()[1]
+        # text column is last, and contains "a b" not "a\tb"
+        assert line.endswith("a b")
+        assert "\t" in line
+
+
+class TestWriteAudacityExact:
+    def test_exact_label_line(self, tmp_path):
+        w = WriteAudacity(str(tmp_path))
+        w(_result_plain(), "audio.wav", {})
+        lines = _read(tmp_path / "audio.aud").splitlines()
+        assert lines[0] == "0.0\t1.0\thello world"
+        assert lines[1] == "1.0\t2.0\tfoo bar"
+
+    def test_speaker_bracket_exact(self, tmp_path):
+        result = {
+            "language": "en",
+            "segments": [
+                {"start": 0.0, "end": 1.0, "text": "hi", "speaker": "SPEAKER_00"},
+            ],
+        }
+        w = WriteAudacity(str(tmp_path))
+        w(result, "audio.wav", {})
+        line = _read(tmp_path / "audio.aud").splitlines()[0]
+        assert line == "0.0\t1.0\t[[SPEAKER_00]]hi"
+
+
+class TestWriteVTTExact:
+    def test_exact_vtt_structure(self, tmp_path):
+        w = WriteVTT(str(tmp_path))
+        w(_result_plain(), "audio.wav", _SUB_OPTIONS)
+        out = _read(tmp_path / "audio.vtt")
+        # VTT starts with WEBVTT header, then blank line, then cue.
+        assert out.startswith("WEBVTT\n\n")
+        cues = out.split("\n\n")
+        # First element is "WEBVTT", rest are cues.
+        assert cues[1].startswith("00:00.000 --> 00:01.000\nhello world")
+        assert cues[2].startswith("00:01.000 --> 00:02.000\nfoo bar")
+
+    def test_vtt_uses_dot_decimal(self, tmp_path):
+        w = WriteVTT(str(tmp_path))
+        w(_result_plain(), "audio.wav", _SUB_OPTIONS)
+        out = _read(tmp_path / "audio.vtt")
+        ts_line = next(ln for ln in out.splitlines() if "-->" in ln)
+        # VTT always uses "." as decimal marker, never ",".
+        assert "." in ts_line.split(" --> ")[0]
+        assert "," not in ts_line.split(" --> ")[0]
+
+
+class TestWriteSRTExact:
+    def test_exact_srt_structure(self, tmp_path):
+        w = WriteSRT(str(tmp_path))
+        w(_result_plain(), "audio.wav", _SUB_OPTIONS)
+        out = _read(tmp_path / "audio.srt")
+        blocks = out.strip().split("\n\n")
+        assert len(blocks) == 2
+        assert blocks[0] == "1\n00:00:00,000 --> 00:00:01,000\nhello world"
+        assert blocks[1] == "2\n00:00:01,000 --> 00:00:02,000\nfoo bar"
+
+    def test_srt_uses_comma_decimal(self, tmp_path):
+        w = WriteSRT(str(tmp_path))
+        w(_result_plain(), "audio.wav", _SUB_OPTIONS)
+        out = _read(tmp_path / "audio.srt")
+        ts_line = next(ln for ln in out.splitlines() if "-->" in ln)
+        # SRT always uses "," as decimal marker, never ".".
+        start, end = ts_line.split(" --> ")
+        assert "," in start
+        assert "," in end
+        assert "." not in start
+        assert "." not in end
+
+    def test_srt_always_includes_hours(self, tmp_path):
+        w = WriteSRT(str(tmp_path))
+        w(_result_plain(), "audio.wav", _SUB_OPTIONS)
+        out = _read(tmp_path / "audio.srt")
+        ts_line = next(ln for ln in out.splitlines() if "-->" in ln)
+        # SRT timestamps always have HH:MM:SS,mmm format.
+        for ts in ts_line.split(" --> "):
+            assert len(ts.split(":")) == 3
+
+
+class TestWriteJSONExact:
+    def test_exact_json_content(self, tmp_path):
+        w = WriteJSON(str(tmp_path))
+        w(_result_plain(), "audio.wav", {})
+        data = json.loads(_read(tmp_path / "audio.json"))
+        assert data["language"] == "en"
+        assert data["segments"] == [
+            {"start": 0.0, "end": 1.0, "text": "hello world"},
+            {"start": 1.0, "end": 2.0, "text": "foo bar"},
+        ]
+
+
+class TestGetWriterExact:
+    def test_all_extensions(self, tmp_path):
+        for fmt, _cls in [
+            ("txt", WriteTXT),
+            ("vtt", WriteVTT),
+            ("srt", WriteSRT),
+            ("tsv", WriteTSV),
+            ("json", WriteJSON),
+            ("aud", WriteAudacity),
+        ]:
+            w = get_writer(fmt, str(tmp_path))
+            assert w.extension == fmt  # pyrefly: ignore[missing-attribute]
+
+    def test_all_writes_all_formats_exact(self, tmp_path):
+        w = get_writer("all", str(tmp_path))
+        w(_result_plain(), "audio.wav", _SUB_OPTIONS)
+        for ext in ("txt", "vtt", "srt", "tsv", "json"):
+            assert (tmp_path / f"audio.{ext}").exists()
+        # Verify content is actually written (not empty).
+        assert _read(tmp_path / "audio.txt").strip()
+        assert _read(tmp_path / "audio.srt").strip()
+        assert _read(tmp_path / "audio.vtt").startswith("WEBVTT")
+
+
+class TestIterateResultPaths:
+    def test_plain_segment_text_arrow_escaped(self, tmp_path):
+        result = {
+            "language": "en",
+            "segments": [{"start": 0.0, "end": 1.0, "text": "a --> b"}],
+        }
+        w = WriteVTT(str(tmp_path))
+        w(result, "audio.wav", _SUB_OPTIONS)
+        out = _read(tmp_path / "audio.vtt")
+        # "-->" in text is replaced with "->".
+        cue_text = out.split("\n\n")[1].split("\n", 1)[1]
+        assert "a -> b" in cue_text
+        assert "a --> b" not in cue_text
+
+    def test_segment_speaker_prefix_in_plain_mode(self, tmp_path):
+        result = {
+            "language": "en",
+            "segments": [
+                {"start": 0.0, "end": 1.0, "text": "hello", "speaker": "SPEAKER_00"},
+            ],
+        }
+        w = WriteVTT(str(tmp_path))
+        w(result, "audio.wav", _SUB_OPTIONS)
+        out = _read(tmp_path / "audio.vtt")
+        assert "[SPEAKER_00]: hello" in out
+
+    def test_empty_segments_writes_only_header(self, tmp_path):
+        result = {"language": "en", "segments": []}
+        w = WriteVTT(str(tmp_path))
+        w(result, "audio.wav", _SUB_OPTIONS)
+        out = _read(tmp_path / "audio.vtt")
+        assert out == "WEBVTT\n\n"
+
+    def test_empty_segments_srt_writes_empty(self, tmp_path):
+        result = {"language": "en", "segments": []}
+        w = WriteSRT(str(tmp_path))
+        w(result, "audio.wav", _SUB_OPTIONS)
+        out = _read(tmp_path / "audio.srt")
+        assert out == ""
+
+    def test_word_subtitle_cue_times_from_words(self, tmp_path):
+        words = [
+            {"word": "alpha", "start": 0.5, "end": 0.8, "score": 1.0},
+            {"word": "beta", "start": 1.0, "end": 1.5, "score": 1.0},
+        ]
+        result = {
+            "language": "en",
+            "segments": [{"start": 0.0, "end": 2.0, "text": "alpha beta", "words": words}],
+        }
+        w = WriteSRT(str(tmp_path))
+        w(result, "audio.wav", _SUB_OPTIONS)
+        out = _read(tmp_path / "audio.srt")
+        ts_line = next(ln for ln in out.splitlines() if "-->" in ln)
+        start, end = ts_line.split(" --> ")
+        # Cue start = min(word starts) = 0.5, end = max(word ends) = 1.5.
+        assert start == "00:00:00,500"
+        assert end == "00:00:01,500"
+
+    def test_word_without_timestamps_falls_back_to_segment_times(self, tmp_path):
+        words = [{"word": "hello"}, {"word": "world"}]
+        result = {
+            "language": "en",
+            "segments": [{"start": 1.0, "end": 2.0, "text": "hello world", "words": words}],
+        }
+        w = WriteSRT(str(tmp_path))
+        w(result, "audio.wav", _SUB_OPTIONS)
+        out = _read(tmp_path / "audio.srt")
+        ts_line = next(ln for ln in out.splitlines() if "-->" in ln)
+        start, end = ts_line.split(" --> ")
+        # Falls back to segment start=1.0, end=2.0.
+        assert start == "00:00:01,000"
+        assert end == "00:00:02,000"
+
+    def test_highlight_words_yields_per_word_cues(self, tmp_path):
+        words = [
+            {"word": "alpha", "start": 0.0, "end": 0.5, "score": 1.0},
+            {"word": "beta", "start": 0.5, "end": 1.0, "score": 1.0},
+        ]
+        result = {
+            "language": "en",
+            "segments": [{"start": 0.0, "end": 1.0, "text": "alpha beta", "words": words}],
+        }
+        opts = {**_SUB_OPTIONS, "highlight_words": True}
+        w = WriteSRT(str(tmp_path))
+        w(result, "audio.wav", opts)
+        out = _read(tmp_path / "audio.srt")
+        # highlight_words emits one cue per word with <u> markup.
+        assert out.count("-->") >= 2
+        assert "<u>alpha</u>" in out
+        assert "<u>beta</u>" in out
+
+    def test_long_pause_breaks_subtitle(self, tmp_path):
+        words = [
+            {"word": "first", "start": 0.0, "end": 0.5, "score": 1.0},
+            {"word": "second", "start": 4.0, "end": 4.5, "score": 1.0},
+        ]
+        result = {
+            "language": "en",
+            "segments": [{"start": 0.0, "end": 5.0, "text": "first second", "words": words}],
+        }
+        opts = {**_SUB_OPTIONS, "max_line_width": 100, "max_line_count": 5}
+        w = WriteSRT(str(tmp_path))
+        w(result, "audio.wav", opts)
+        out = _read(tmp_path / "audio.srt")
+        # >3s pause between word starts forces a subtitle break.
+        assert out.count("-->") >= 2
+
+    def test_max_line_count_breaks_subtitle(self, tmp_path):
+        words = [
+            {"word": f"word{i:02d}", "start": i * 0.5, "end": i * 0.5 + 0.4, "score": 1.0}
+            for i in range(20)
+        ]
+        result = {
+            "language": "en",
+            "segments": [
+                {
+                    "start": 0.0,
+                    "end": 10.0,
+                    "text": " ".join(w["word"] for w in words),
+                    "words": words,
+                }
+            ],
+        }
+        opts = {**_SUB_OPTIONS, "max_line_width": 30, "max_line_count": 2}
+        w = WriteSRT(str(tmp_path))
+        w(result, "audio.wav", opts)
+        out = _read(tmp_path / "audio.srt")
+        assert out.count("-->") > 1
+
+    def test_japanese_words_joined_without_spaces(self, tmp_path):
+        words = [
+            {"word": "こんにちは", "start": 0.0, "end": 0.5, "score": 1.0},
+            {"word": "世界", "start": 0.5, "end": 1.0, "score": 1.0},
+        ]
+        result = {
+            "language": "ja",
+            "segments": [{"start": 0.0, "end": 1.0, "text": "こんにちは世界", "words": words}],
+        }
+        w = WriteSRT(str(tmp_path))
+        w(result, "audio.wav", _SUB_OPTIONS)
+        out = _read(tmp_path / "audio.srt")
+        assert "こんにちは世界" in out
+        # No space between Japanese words.
+        assert "こんにちは 世界" not in out
+
+
+# Content-asserting writer tests: assert exact bytes to kill string/separator
+# and control-flow mutants in write_result / iterate_result.
+
+
+class TestWriteTXTContent:
+    def test_plain_text_lines_match_input(self, tmp_path):
+        w = WriteTXT(str(tmp_path))
+        w(_result_plain(), "audio.wav", {})
+        lines = _read(tmp_path / "audio.txt").splitlines()
+        assert lines == ["hello world", "foo bar"]
+
+    def test_speaker_prefix_exact_format(self, tmp_path):
+        w = WriteTXT(str(tmp_path))
+        w(_result_with_words(), "audio.wav", {})
+        line = _read(tmp_path / "audio.txt").splitlines()[0]
+        assert line == "[SPEAKER_00]: hello world"
+
+    def test_no_speaker_has_no_brackets(self, tmp_path):
+        result = {
+            "language": "en",
+            "segments": [
+                {"start": 0.0, "end": 1.0, "text": "plain text", "speaker": None},
+            ],
+        }
+        w = WriteTXT(str(tmp_path))
+        w(result, "audio.wav", {})
+        out = _read(tmp_path / "audio.txt")
+        assert "[" not in out
+        assert out.strip() == "plain text"
+
+
+class TestWriteTSVContent:
+    def test_header_and_exact_rows(self, tmp_path):
+        w = WriteTSV(str(tmp_path))
+        w(_result_plain(), "audio.wav", {})
+        lines = _read(tmp_path / "audio.tsv").splitlines()
+        assert lines[0] == "start\tend\ttext"
+        # Row 1: 0.0s -> 0ms, 1.0s -> 1000ms, tab-separated.
+        assert lines[1] == "0\t1000\thello world"
+        assert lines[2] == "1000\t2000\tfoo bar"
+
+    def test_text_tab_replaced_with_space(self, tmp_path):
+        result = {
+            "language": "en",
+            "segments": [{"start": 0.0, "end": 1.0, "text": "a\tb\tc"}],
+        }
+        w = WriteTSV(str(tmp_path))
+        w(result, "audio.wav", {})
+        line = _read(tmp_path / "audio.tsv").splitlines()[1]
+        # Three columns: start, end, text. Text has tabs replaced by spaces.
+        cols = line.split("\t")
+        assert len(cols) == 3
+        assert cols[2] == "a b c"
+
+
+class TestWriteAudacityContent:
+    def test_label_lines_exact(self, tmp_path):
+        w = WriteAudacity(str(tmp_path))
+        w(_result_plain(), "audio.wav", {})
+        lines = _read(tmp_path / "audio.aud").splitlines()
+        assert lines[0] == "0.0\t1.0\thello world"
+        assert lines[1] == "1.0\t2.0\tfoo bar"
+
+    def test_speaker_double_brackets(self, tmp_path):
+        result = {
+            "language": "en",
+            "segments": [
+                {"start": 0.0, "end": 1.0, "text": "hi", "speaker": "SPEAKER_00"},
+            ],
+        }
+        w = WriteAudacity(str(tmp_path))
+        w(result, "audio.wav", {})
+        line = _read(tmp_path / "audio.aud").splitlines()[0]
+        assert line == "0.0\t1.0\t[[SPEAKER_00]]hi"
+
+
+class TestWriteVTTContent:
+    def test_header_then_cues(self, tmp_path):
+        w = WriteVTT(str(tmp_path))
+        w(_result_plain(), "audio.wav", _SUB_OPTIONS)
+        out = _read(tmp_path / "audio.vtt")
+        assert out.startswith("WEBVTT\n\n")
+        # Cue with --> arrow and dot decimal marker.
+        assert "00:00.000 --> 00:01.000" in out
+        assert "hello world" in out
+
+    def test_no_webvtt_when_not_first(self, tmp_path):
+        # The WEBVTT header is the very first line; nothing precedes it.
+        w = WriteVTT(str(tmp_path))
+        w(_result_plain(), "audio.wav", _SUB_OPTIONS)
+        out = _read(tmp_path / "audio.vtt")
+        assert out.split("\n", 1)[0] == "WEBVTT"
+
+
+class TestWriteSRTContent:
+    def test_numbered_cues_with_comma_and_hours(self, tmp_path):
+        w = WriteSRT(str(tmp_path))
+        w(_result_plain(), "audio.wav", _SUB_OPTIONS)
+        out = _read(tmp_path / "audio.srt")
+        blocks = out.strip().split("\n\n")
+        assert len(blocks) == 2
+        # Each block starts with an index, then the timestamp line.
+        assert blocks[0].startswith("1\n")
+        assert blocks[1].startswith("2\n")
+        # SRT uses comma decimal + always-include-hours.
+        assert "00:00:00,000 --> 00:00:01,000" in blocks[0]
+        assert "00:00:01,000 --> 00:00:02,000" in blocks[1]
+        assert "hello world" in blocks[0]
+
+    def test_text_arrow_replaced_in_srt(self, tmp_path):
+        result = {
+            "language": "en",
+            "segments": [{"start": 0.0, "end": 1.0, "text": "a --> b"}],
+        }
+        w = WriteSRT(str(tmp_path))
+        w(result, "audio.wav", _SUB_OPTIONS)
+        out = _read(tmp_path / "audio.srt")
+        # "-->" in text becomes "->"; the cue separator remains "-->".
+        assert "a -> b" in out
+
+
+class TestGetWriterDispatch:
+    def test_all_writes_each_format_with_content(self, tmp_path):
+        w = get_writer("all", str(tmp_path))
+        w(_result_plain(), "audio.wav", _SUB_OPTIONS)
+        # Each format has its distinguishing content.
+        assert (tmp_path / "audio.txt").read_text(encoding="utf-8").strip()
+        assert (tmp_path / "audio.vtt").read_text(encoding="utf-8").startswith("WEBVTT")
+        assert "-->" in (tmp_path / "audio.srt").read_text(encoding="utf-8")
+        assert (tmp_path / "audio.tsv").read_text(encoding="utf-8").startswith("start\t")
+        import json as _json
+
+        assert (
+            _json.loads((tmp_path / "audio.json").read_text(encoding="utf-8"))["language"] == "en"
+        )
+
+    def test_unknown_format_raises_keyerror(self, tmp_path):
+        # writers dict does not contain bogus formats.
+        with pytest.raises(KeyError):
+            get_writer("bogus", str(tmp_path))
+
+
+class TestSubtitlesWriterIterateResult:
+    def test_preserve_segments_keeps_segment_boundary(self, tmp_path):
+        # With max_line_count=None, preserve_segments=True, so a new segment
+        # forces a subtitle break at i==0. Two segments -> two cues.
+        result = {
+            "language": "en",
+            "segments": [
+                {
+                    "start": 0.0,
+                    "end": 1.0,
+                    "text": "first segment",
+                    "words": [
+                        {"word": "first", "start": 0.0, "end": 0.5, "score": 1.0},
+                        {"word": "segment", "start": 0.5, "end": 1.0, "score": 1.0},
+                    ],
+                },
+                {
+                    "start": 2.0,
+                    "end": 3.0,
+                    "text": "second segment",
+                    "words": [
+                        {"word": "second", "start": 2.0, "end": 2.5, "score": 1.0},
+                        {"word": "segment", "start": 2.5, "end": 3.0, "score": 1.0},
+                    ],
+                },
+            ],
+        }
+        opts = {**_SUB_OPTIONS, "max_line_width": 100, "max_line_count": None}
+        w = WriteSRT(str(tmp_path))
+        w(result, "audio.wav", opts)
+        out = _read(tmp_path / "audio.srt")
+        # Two cue blocks -> two "-->" separators.
+        assert out.count("-->") == 2
+
+    def test_long_pause_break_when_not_preserved(self, tmp_path):
+        # preserve_segments=False (both width and count set); a >3s gap between
+        # word starts triggers a subtitle break.
+        words = [
+            {"word": "alpha", "start": 0.0, "end": 0.5, "score": 1.0},
+            {"word": "beta", "start": 4.0, "end": 4.5, "score": 1.0},
+            {"word": "gamma", "start": 4.6, "end": 5.0, "score": 1.0},
+        ]
+        result = {
+            "language": "en",
+            "segments": [{"start": 0.0, "end": 5.0, "text": "alpha beta gamma", "words": words}],
+        }
+        opts = {**_SUB_OPTIONS, "max_line_width": 100, "max_line_count": 5}
+        w = WriteSRT(str(tmp_path))
+        w(result, "audio.wav", opts)
+        out = _read(tmp_path / "audio.srt")
+        # long_pause breaks the subtitle; >= 2 cues.
+        assert out.count("-->") >= 2
+
+    def test_max_line_count_breaks_subtitle(self, tmp_path):
+        # line_count reaches max_line_count -> subtitle break. Use a small
+        # max_line_width so words wrap to new lines, incrementing line_count.
+        words = [
+            {"word": f"word{i:02d}", "start": i * 0.3, "end": i * 0.3 + 0.2, "score": 1.0}
+            for i in range(10)
+        ]
+        result = {
+            "language": "en",
+            "segments": [
+                {
+                    "start": 0.0,
+                    "end": 3.0,
+                    "text": " ".join(w["word"] for w in words),
+                    "words": words,
+                }
+            ],
+        }
+        opts = {**_SUB_OPTIONS, "max_line_width": 12, "max_line_count": 2}
+        w = WriteVTT(str(tmp_path))
+        w(result, "audio.wav", opts)
+        out = _read(tmp_path / "audio.vtt")
+        assert out.count("-->") >= 2
+
+    def test_word_stripped_on_new_line(self, tmp_path):
+        # A word with surrounding whitespace is stripped when a new line starts.
+        words = [
+            {"word": "  hello  ", "start": 0.0, "end": 0.5, "score": 1.0},
+            {"word": "world", "start": 0.5, "end": 1.0, "score": 1.0},
+        ]
+        result = {
+            "language": "en",
+            "segments": [{"start": 0.0, "end": 1.0, "text": "hello world", "words": words}],
+        }
+        w = WriteVTT(str(tmp_path))
+        w(result, "audio.wav", _SUB_OPTIONS)
+        out = _read(tmp_path / "audio.vtt")
+        assert "hello" in out
+        # No double-space from the un-stripped leading whitespace.
+        assert "  " not in out.replace("\n", "")
+
+
+class TestInterpolateNansEdges:
+    def test_all_nan_returns_all_nan_via_ffill_bfill(self):
+        # notnull().sum() == 0 (<=1), so ffill().bfill() path: stays all-NaN.
+        s = pd.Series([np.nan, np.nan, np.nan])
+        out = interpolate_nans(s, method="nearest")
+        assert out.isna().all()
+
+    def test_two_nonnull_interpolates(self):
+        s = pd.Series([1.0, np.nan, np.nan, 4.0])
+        out = interpolate_nans(s, method="nearest")
+        assert out.notna().all()
+        assert out.iloc[0] == 1.0
+        assert out.iloc[-1] == 4.0
+
+    def test_leading_nan_ffilled(self):
+        s = pd.Series([np.nan, np.nan, 3.0, 4.0])
+        out = interpolate_nans(s, method="nearest")
+        assert out.notna().all()
+        assert out.iloc[0] == 3.0
+
+    def test_trailing_nan_bfilled(self):
+        s = pd.Series([1.0, 2.0, np.nan, np.nan])
+        out = interpolate_nans(s, method="nearest")
+        assert out.notna().all()
+        assert out.iloc[-1] == 2.0
+
+    def test_linear_method(self):
+        s = pd.Series([0.0, np.nan, 10.0])
+        out = interpolate_nans(s, method="linear")
+        assert out.notna().all()
+        assert out.iloc[1] == 5.0
+
+
+class TestFormatTimestampEdges:
+    def test_just_under_one_hour_no_hours_marker(self):
+        # 3599.999ms -> hours=0, so no hours marker; output is MM:SS.mmm.
+        out = format_timestamp(3599.999)
+        assert out == "59:59.999"
+
+    def test_just_over_one_hour_adds_hours_marker(self):
+        # 3600.0 -> hours=1, so the hours marker is added even though
+        # always_include_hours defaults to False.
+        out = format_timestamp(3600.0)
+        assert out.startswith("01:")
+
+    def test_exactly_one_hour(self):
+        assert format_timestamp(3600.0) == "01:00:00.000"
+
+    def test_large_value(self):
+        assert format_timestamp(3661.5, always_include_hours=True) == "01:01:01.500"
+
+    def test_default_decimal_marker_dot(self):
+        assert format_timestamp(0.5).endswith(".500")
+
+    def test_rounding_boundary(self):
+        # 1.2345 -> 1234.5 ms -> rounds to 1235 (round() uses banker's rounding
+        # but 1234.5 -> 1234 in python3 round; verify the actual value).
+        out = format_timestamp(1.2345)
+        assert out.endswith(("235", "234"))
+
+
+class TestCompressionRatioEdges:
+    def test_empty_string(self):
+        # Empty input: 0 bytes / len(compress) = 0.0 (or raises). Verify it
+        # returns a float without raising.
+        out = compression_ratio("")
+        assert isinstance(out, float)
+
+    def test_single_char(self):
+        # A single byte compresses to ~9 bytes of zlib overhead, ratio < 1.
+        out = compression_ratio("a")
+        assert isinstance(out, float)
+        assert out < 1.0

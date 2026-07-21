@@ -332,3 +332,395 @@ class TestBinarizeSegments:
             out = pipe._binarize_segments(np.array([0.9]), np.array([0.5]))
         assert out == [(0.0, 1.0), (2.0, 3.0)]
         assert all(isinstance(s, float) and isinstance(e, float) for s, e in out)
+
+
+# Default-argument and real-data tests: kill default-value and construction
+# mutants by exercising real interval data and real score arrays.
+
+
+class TestAssignWordSpeakersDefaults:
+    def _df(self, rows):
+        return pd.DataFrame(
+            [
+                {
+                    "segment": Segment(s, e, spk),
+                    "label": 0,
+                    "speaker": spk,
+                    "start": s,
+                    "end": e,
+                }
+                for s, e, spk in rows
+            ]
+        )
+
+    def test_default_fill_nearest_is_false(self):
+        # Call with only required args; fill_nearest defaults to False, so a
+        # segment with no overlap does NOT get a speaker assigned.
+        df = self._df([(0.0, 1.0, "SPEAKER_00")])
+        result: TranscriptionResult = {
+            "segments": [{"start": 5.0, "end": 6.0, "text": "later"}],
+            "language": "en",
+        }
+        out = assign_word_speakers(df, result)
+        assert "speaker" not in out["segments"][0]
+
+    def test_default_returns_transcript_result(self):
+        df = self._df([(0.0, 1.0, "SPEAKER_00")])
+        result: TranscriptionResult = {
+            "segments": [{"start": 0.0, "end": 1.0, "text": "hi"}],
+            "language": "en",
+        }
+        out = assign_word_speakers(df, result)
+        assert out is result
+        assert out["segments"][0]["speaker"] == "SPEAKER_00"
+
+    def test_empty_df_returns_unchanged(self):
+        empty_df = pd.DataFrame(columns=["segment", "label", "speaker", "start", "end"])
+        result: TranscriptionResult = {
+            "segments": [{"start": 0.0, "end": 1.0, "text": "hi"}],
+            "language": "en",
+        }
+        out = assign_word_speakers(empty_df, result)
+        assert "speaker" not in out["segments"][0]
+
+    def test_fill_nearest_default_false_for_words_too(self):
+        # Words with no overlap and fill_nearest=False stay unset.
+        df = self._df([(0.0, 0.4, "SPEAKER_00")])
+        result: AlignedTranscriptionResult = {
+            "segments": [
+                {
+                    "start": 0.0,
+                    "end": 1.0,
+                    "text": "hi there",
+                    "words": [
+                        {"word": "hi", "start": 0.0, "end": 0.3, "score": 1.0},
+                        {"word": "there", "start": 0.9, "end": 1.0, "score": 1.0},
+                    ],
+                    "chars": None,
+                }
+            ],
+            "word_segments": [],
+        }
+        out = assign_word_speakers(df, result)
+        aligned: AlignedTranscriptionResult = out  # pyrefly: ignore[bad-assignment]
+        # "there" (0.9-1.0) does not overlap (0.0-0.4); fill_nearest=False default.
+        assert "speaker" not in aligned["segments"][0]["words"][1]
+
+
+class TestIntervalTreeRealData:
+    def test_unsorted_intervals_are_sorted_by_start(self):
+        # Pass intervals out of order; query still works because __init__ sorts.
+        tree = IntervalTree([(5.0, 6.0, "B"), (0.0, 1.0, "A"), (2.0, 3.0, "C")])
+        # starts array is sorted ascending.
+        starts = list(tree.starts)
+        assert starts == sorted(starts)
+        assert starts == [0.0, 2.0, 5.0]
+        # speakers follow the sorted order.
+        assert tree.speakers == ["A", "C", "B"]
+
+    def test_starts_and_ends_are_float64_arrays(self):
+        tree = IntervalTree([(0.0, 1.0, "A")])
+        assert tree.starts.dtype == np.float64
+        assert tree.ends.dtype == np.float64
+        assert tree.starts[0] == 0.0
+        assert tree.ends[0] == 1.0
+
+    def test_empty_tree_attributes(self):
+        tree = IntervalTree([])
+        assert len(tree.starts) == 0
+        assert len(tree.ends) == 0
+        assert tree.speakers == []
+        assert tree.query(0.0, 1.0) == []
+        assert tree.find_nearest(0.5) is None
+
+    def test_query_returns_intersection_duration(self):
+        tree = IntervalTree([(0.0, 4.0, "A")])
+        # Query (1.0, 3.0) -> intersection = 2.0.
+        result = tree.query(1.0, 3.0)
+        assert len(result) == 1
+        assert result[0][0] == "A"
+        assert result[0][1] == pytest.approx(2.0)
+
+    def test_query_partial_overlap_at_end(self):
+        tree = IntervalTree([(0.0, 2.0, "A"), (3.0, 5.0, "B")])
+        # Query (1.5, 3.5) overlaps both: A intersects [1.5,2.0)=0.5, B [3.0,3.5)=0.5.
+        result = tree.query(1.5, 3.5)
+        speakers = {r[0] for r in result}
+        assert speakers == {"A", "B"}
+
+    def test_find_nearest_picks_closest_midpoint(self):
+        tree = IntervalTree([(0.0, 2.0, "A"), (10.0, 12.0, "B")])
+        # midpoints: A=1.0, B=11.0. t=4.0 is closer to A (|1-4|=3 vs |11-4|=7).
+        assert tree.find_nearest(4.0) == "A"
+        assert tree.find_nearest(8.0) == "B"
+
+    def test_query_end_exactly_at_start_returns_empty(self):
+        tree = IntervalTree([(1.0, 2.0, "A")])
+        # end=1.0 equals the interval start; no overlap (strict <).
+        assert tree.query(0.0, 1.0) == []
+
+
+class TestBinarizeSegmentsReal:
+    def test_binarize_with_real_speech_scores(self):
+        # Drive _binarize_segments with a real score array that crosses onset.
+        pipe = DiarizationPipeline.__new__(DiarizationPipeline)
+        pipe.vad_onset = 0.5
+        pipe.vad_offset = 0.363
+        # Scores: 0.9 (speech), 0.9, 0.1 (below offset -> segment ends), 0.9 (speech).
+        scores = np.array([0.9, 0.9, 0.1, 0.9], dtype=np.float32)
+        frame_times = np.array([0.0, 0.5, 1.0, 1.5], dtype=np.float32)
+        out = pipe._binarize_segments(scores, frame_times)
+        # At least one speech segment produced.
+        assert len(out) >= 1
+        for s, e in out:
+            assert isinstance(s, float)
+            assert isinstance(e, float)
+            assert e > s
+
+    def test_binarize_uses_onset_and_offset_thresholds(self):
+        pipe = DiarizationPipeline.__new__(DiarizationPipeline)
+        pipe.vad_onset = 0.5
+        pipe.vad_offset = 0.363
+        # All scores below onset -> no speech.
+        scores = np.array([0.1, 0.2, 0.1], dtype=np.float32)
+        frame_times = np.array([0.0, 0.5, 1.0], dtype=np.float32)
+        out = pipe._binarize_segments(scores, frame_times)
+        assert out == []
+
+    def test_binarize_returns_float_tuples(self):
+        pipe = DiarizationPipeline.__new__(DiarizationPipeline)
+        pipe.vad_onset = 0.5
+        pipe.vad_offset = 0.363
+        scores = np.array([[0.9], [0.9], [0.9]], dtype=np.float32)
+        frame_times = np.array([0.0, 0.5, 1.0], dtype=np.float32)
+        out = pipe._binarize_segments(scores, frame_times)
+        assert len(out) >= 1
+        for s, e in out:
+            assert isinstance(s, float) and isinstance(e, float)
+
+
+# --- Exact-value assertions for IntervalTree and assign_word_speakers -------
+# These kill default-value, sorting, and intersection mutants by asserting
+# exact speaker labels and intersection magnitudes.
+
+
+class TestIntervalTreeExact:
+    def test_intervals_sorted_by_start(self):
+        tree = IntervalTree([(5.0, 6.0, "B"), (0.0, 1.0, "A"), (2.0, 3.0, "C")])
+        # Internal sort must order by start; speakers list follows the sort.
+        assert list(tree.speakers) == ["A", "C", "B"]
+        assert tree.starts.tolist() == [0.0, 2.0, 5.0]
+        assert tree.ends.tolist() == [1.0, 3.0, 6.0]
+
+    def test_single_interval_exact_intersection(self):
+        tree = IntervalTree([(0.0, 1.0, "SPEAKER_00")])
+        result = tree.query(0.2, 0.5)
+        assert len(result) == 1
+        assert result[0] == ("SPEAKER_00", pytest.approx(0.3))
+
+    def test_exact_intersection_is_min_end_minus_max_start(self):
+        # intersection = min(end, q_end) - max(start, q_start)
+        tree = IntervalTree([(0.0, 2.0, "A")])
+        result = tree.query(0.5, 1.5)
+        # intersection = min(2.0, 1.5) - max(0.0, 0.5) = 1.5 - 0.5 = 1.0
+        assert result == [("A", pytest.approx(1.0))]
+
+    def test_query_within_interval_returns_full_overlap(self):
+        tree = IntervalTree([(0.0, 10.0, "A")])
+        result = tree.query(2.0, 5.0)
+        # intersection = min(10, 5) - max(0, 2) = 5 - 2 = 3
+        assert result == [("A", pytest.approx(3.0))]
+
+    def test_two_overlapping_speakers_exact(self):
+        tree = IntervalTree([(0.0, 2.0, "A"), (1.0, 3.0, "B")])
+        result = tree.query(1.0, 2.0)
+        result_dict = {r[0]: r[1] for r in result}
+        # A: min(2.0, 2.0) - max(0.0, 1.0) = 2.0 - 1.0 = 1.0
+        assert result_dict["A"] == pytest.approx(1.0)
+        # B: min(3.0, 2.0) - max(1.0, 1.0) = 2.0 - 1.0 = 1.0
+        assert result_dict["B"] == pytest.approx(1.0)
+
+    def test_boundary_touch_not_returned(self):
+        # An interval ending exactly at query start has intersection 0 (excluded).
+        tree = IntervalTree([(0.0, 1.0, "A")])
+        result = tree.query(1.0, 2.0)
+        assert result == []
+
+    def test_find_nearest_returns_nearest_midpoint(self):
+        tree = IntervalTree([(0.0, 2.0, "A"), (10.0, 12.0, "B")])
+        # midpoints: A=1.0, B=11.0. time=3.0 -> |1-3|=2, |11-3|=8 -> A.
+        assert tree.find_nearest(3.0) == "A"
+        # time=8.0 -> |1-8|=7, |11-8|=3 -> B.
+        assert tree.find_nearest(8.0) == "B"
+
+    def test_find_nearest_exact_at_midpoint(self):
+        tree = IntervalTree([(0.0, 2.0, "A")])
+        # midpoint = 1.0; querying exactly at it returns A.
+        assert tree.find_nearest(1.0) == "A"
+
+    def test_query_end_before_all_starts_returns_empty(self):
+        tree = IntervalTree([(5.0, 6.0, "A"), (10.0, 11.0, "B")])
+        assert tree.query(0.0, 1.0) == []
+
+    def test_empty_tree_find_nearest_returns_none(self):
+        tree = IntervalTree([])
+        assert tree.find_nearest(0.5) is None
+
+    def test_three_intervals_speakers_preserved(self):
+        tree = IntervalTree([(0.0, 1.0, "X"), (2.0, 3.0, "Y"), (4.0, 5.0, "Z")])
+        assert tree.speakers == ["X", "Y", "Z"]
+        result = tree.query(2.5, 4.5)
+        speakers = {r[0] for r in result}
+        assert speakers == {"Y", "Z"}
+
+
+class TestAssignWordSpeakersExact:
+    def _diarize_df(self, rows):
+        return pd.DataFrame(
+            [
+                {
+                    "segment": Segment(s, e, spk),
+                    "label": int(spk.split("_")[1]) if spk and "_" in spk else 0,
+                    "speaker": spk,
+                    "start": s,
+                    "end": e,
+                }
+                for s, e, spk in rows
+            ]
+        )
+
+    def test_default_fill_nearest_is_false(self):
+        # fill_nearest defaults to False; segment with no overlap gets no speaker.
+        df = self._diarize_df([(0.0, 1.0, "SPEAKER_00")])
+        result: TranscriptionResult = {
+            "segments": [{"start": 5.0, "end": 6.0, "text": "later"}],
+            "language": "en",
+        }
+        out = assign_word_speakers(df, result)
+        assert "speaker" not in out["segments"][0]
+
+    def test_segment_speaker_exact_label(self):
+        df = self._diarize_df([(0.0, 1.0, "SPEAKER_00")])
+        result: TranscriptionResult = {
+            "segments": [{"start": 0.1, "end": 0.9, "text": "hello"}],
+            "language": "en",
+        }
+        out = assign_word_speakers(df, result)
+        assert out["segments"][0]["speaker"] == "SPEAKER_00"
+
+    def test_word_speaker_exact_labels(self):
+        df = self._diarize_df([(0.0, 0.5, "SPEAKER_00"), (0.5, 1.0, "SPEAKER_01")])
+        result: AlignedTranscriptionResult = {
+            "segments": [
+                {
+                    "start": 0.0,
+                    "end": 1.0,
+                    "text": "hello world",
+                    "words": [
+                        {"word": "hello", "start": 0.0, "end": 0.4, "score": 1.0},
+                        {"word": "world", "start": 0.6, "end": 1.0, "score": 1.0},
+                    ],
+                    "chars": None,
+                }
+            ],
+            "word_segments": [],
+        }
+        out = assign_word_speakers(df, result)
+        aligned: AlignedTranscriptionResult = out  # pyrefly: ignore[bad-assignment]
+        words = aligned["segments"][0]["words"]
+        assert words[0]["speaker"] == "SPEAKER_00"
+        assert words[1]["speaker"] == "SPEAKER_01"
+
+    def test_fill_nearest_assigns_nearest_speaker(self):
+        df = self._diarize_df([(0.0, 1.0, "SPEAKER_00")])
+        result: TranscriptionResult = {
+            "segments": [{"start": 2.0, "end": 3.0, "text": "later"}],
+            "language": "en",
+        }
+        out = assign_word_speakers(df, result, fill_nearest=True)
+        # midpoint of segment (2,3) = 2.5; midpoint of interval (0,1) = 0.5.
+        # Only one speaker, so nearest is SPEAKER_00.
+        assert out["segments"][0]["speaker"] == "SPEAKER_00"
+
+    def test_fill_nearest_word_assigns_nearest(self):
+        df = self._diarize_df([(0.0, 0.5, "SPEAKER_00")])
+        result: AlignedTranscriptionResult = {
+            "segments": [
+                {
+                    "start": 2.0,
+                    "end": 3.0,
+                    "text": "later",
+                    "words": [
+                        {"word": "later", "start": 2.0, "end": 3.0, "score": 1.0},
+                    ],
+                    "chars": None,
+                }
+            ],
+            "word_segments": [],
+        }
+        out = assign_word_speakers(df, result, fill_nearest=True)
+        aligned: AlignedTranscriptionResult = out  # pyrefly: ignore[bad-assignment]
+        assert aligned["segments"][0]["words"][0]["speaker"] == "SPEAKER_00"
+
+    def test_dominant_speaker_is_max_intersection(self):
+        # Two speakers overlap a segment; the one with the larger intersection wins.
+        # A: (0.0, 0.4) -> intersection with (0.1, 1.0) = min(0.4,1.0)-max(0.0,0.1)=0.3
+        # B: (0.1, 1.0) -> intersection with (0.1, 1.0) = min(1.0,1.0)-max(0.1,0.1)=0.9
+        df = self._diarize_df([(0.0, 0.4, "SPEAKER_00"), (0.1, 1.0, "SPEAKER_01")])
+        result: TranscriptionResult = {
+            "segments": [{"start": 0.1, "end": 1.0, "text": "hi"}],
+            "language": "en",
+        }
+        out = assign_word_speakers(df, result)
+        assert out["segments"][0]["speaker"] == "SPEAKER_01"
+
+    def test_word_without_end_uses_start_as_end(self):
+        # word_end = word.get("end", word_start); a word with only start still
+        # queries with start==end, which yields zero intersection, so no speaker.
+        # Use fill_nearest to verify the fallback uses word_mid = start.
+        df = self._diarize_df([(0.0, 1.0, "SPEAKER_00")])
+        result: AlignedTranscriptionResult = {
+            "segments": [
+                {
+                    "start": 0.0,
+                    "end": 1.0,
+                    "text": "hi",
+                    "words": [{"word": "hi", "start": 0.2, "score": 1.0}],  # pyrefly: ignore[bad-typed-dict-key]
+                    "chars": None,
+                }
+            ],
+            "word_segments": [],
+        }
+        out = assign_word_speakers(df, result, fill_nearest=True)
+        aligned: AlignedTranscriptionResult = out  # pyrefly: ignore[bad-assignment]
+        # word_mid = (0.2 + 0.2) / 2 = 0.2; nearest speaker is SPEAKER_00.
+        assert aligned["segments"][0]["words"][0]["speaker"] == "SPEAKER_00"
+
+    def test_speaker_embeddings_attached_when_provided(self):
+        df = self._diarize_df([(0.0, 1.0, "SPEAKER_00")])
+        result: TranscriptionResult = {
+            "segments": [{"start": 0.0, "end": 1.0, "text": "hi"}],
+            "language": "en",
+        }
+        emb = {"SPEAKER_00": [0.1, 0.2, 0.3]}
+        out = assign_word_speakers(df, result, speaker_embeddings=emb)
+        assert out["speaker_embeddings"] == emb
+
+    def test_no_embeddings_does_not_set_key(self):
+        df = self._diarize_df([(0.0, 1.0, "SPEAKER_00")])
+        result: TranscriptionResult = {
+            "segments": [{"start": 0.0, "end": 1.0, "text": "hi"}],
+            "language": "en",
+        }
+        out = assign_word_speakers(df, result)
+        assert "speaker_embeddings" not in out
+
+    def test_empty_df_returns_unchanged(self):
+        df = pd.DataFrame(columns=["start", "end", "speaker", "segment", "label"])
+        result: TranscriptionResult = {
+            "segments": [{"start": 0.0, "end": 1.0, "text": "hi"}],
+            "language": "en",
+        }
+        out = assign_word_speakers(df, result)
+        assert out is result
+        assert "speaker" not in out["segments"][0]

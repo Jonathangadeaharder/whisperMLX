@@ -132,6 +132,7 @@ filterwarnings = [
 ]
 markers = [
     "e2e: end-to-end tests that run the full whispermlx CLI on real audio (slow, downloads models)",
+    "slow: integration tests that load real cached models (~seconds each, no network)",
 ]
 
 [tool.coverage.run]
@@ -162,5 +163,5 @@ do_not_mutate = [
     "whisperx/__main__.py",
     "whisperx/mlx_models/__init__.py",
 ]
-runner = "uv run pytest -x -q --no-cov -m 'not e2e'"
+runner = "uv run pytest -q --no-cov -m 'not e2e and not slow'"
 minimum_mutation_score = 80

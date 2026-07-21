@@ -419,3 +419,283 @@ class TestLoadModel:
                     vad_options={"chunk_size": 30, "vad_onset": 0.5, "vad_offset": 0.363},
                 )
         assert isinstance(pipe, MlxWhisperPipeline)
+
+
+# Default-argument and branch-coverage tests: kill default-value mutants on
+# load_model and transcribe by exercising real code paths.
+
+
+class TestLoadModelDefaults:
+    def test_default_vad_method_is_pyannote(self):
+        # Only required args; vad_method defaults to "pyannote".
+        with patch(
+            "whisperx.mlx_models.pyannote_segmentation.segment_audio", lambda *a, **k: ([], [])
+        ):
+            pipe = load_model(
+                "small",
+                device="cpu",
+                vad_options={"chunk_size": 30, "vad_onset": 0.5, "vad_offset": 0.363},
+            )
+        assert isinstance(pipe, MlxWhisperPipeline)
+        # Default vad_method=pyannote built a Pyannote VAD.
+        from whisperx.vads.pyannote import Pyannote
+
+        assert isinstance(pipe.vad_model, Pyannote)
+
+    def test_default_compute_type_default_does_not_log(self, caplog):
+        # compute_type defaults to "default" -> the info log is skipped.
+        with patch(
+            "whisperx.mlx_models.pyannote_segmentation.segment_audio", lambda *a, **k: ([], [])
+        ):
+            with caplog.at_level("INFO", logger="whisperx.asr"):
+                pipe = load_model(
+                    "small",
+                    device="cpu",
+                    vad_options={"chunk_size": 30, "vad_onset": 0.5, "vad_offset": 0.363},
+                )
+        assert isinstance(pipe, MlxWhisperPipeline)
+        assert "compute_type" not in caplog.text
+
+    def test_default_mlx_options_drop_none_values(self):
+        # mlx_options filters out None values; default asr_options produce a
+        # mlx_options dict with no None entries.
+        with patch(
+            "whisperx.mlx_models.pyannote_segmentation.segment_audio", lambda *a, **k: ([], [])
+        ):
+            pipe = load_model(
+                "small",
+                device="cpu",
+                vad_options={"chunk_size": 30, "vad_onset": 0.5, "vad_offset": 0.363},
+            )
+        for k, v in pipe._mlx_options.items():
+            assert v is not None, f"{k} is None"
+
+    def test_en_suffix_sets_language_en(self):
+        with patch(
+            "whisperx.mlx_models.pyannote_segmentation.segment_audio", lambda *a, **k: ([], [])
+        ):
+            pipe = load_model(
+                "small.en",
+                device="cpu",
+                vad_options={"chunk_size": 30, "vad_onset": 0.5, "vad_offset": 0.363},
+            )
+        assert pipe.preset_language == "en"
+
+    def test_default_vad_options_applied(self):
+        # vad_options=None -> defaults {chunk_size:30, vad_onset:0.5, vad_offset:0.363}.
+        with patch(
+            "whisperx.mlx_models.pyannote_segmentation.segment_audio", lambda *a, **k: ([], [])
+        ):
+            pipe = load_model("small", device="cpu")
+        assert pipe._vad_params["chunk_size"] == 30
+        assert pipe._vad_params["vad_onset"] == 0.5
+        assert pipe._vad_params["vad_offset"] == 0.363
+
+    def test_suppress_tokens_default_neg_one(self):
+        with patch(
+            "whisperx.mlx_models.pyannote_segmentation.segment_audio", lambda *a, **k: ([], [])
+        ):
+            pipe = load_model(
+                "small",
+                device="cpu",
+                vad_options={"chunk_size": 30, "vad_onset": 0.5, "vad_offset": 0.363},
+            )
+        assert pipe.suppress_tokens == [-1]
+
+
+class TestMlxWhisperPipelineTranscribeBranches:
+    def _vad(self):
+        from whisperx.vads.vad import Vad
+
+        class _Vad(Vad):
+            def __init__(self):
+                super().__init__(0.5)
+
+            def preprocess_audio(self, audio):
+                return audio
+
+            @staticmethod
+            def merge_chunks(segments, chunk_size, onset=0.5, offset=None):
+                return [{"start": 0.0, "end": 1.0, "segments": [(0.0, 1.0)]}]
+
+            def __call__(self, audio):
+                from unittest.mock import MagicMock
+
+                return [MagicMock(start=0.0, end=1.0, speaker="UNKNOWN")]
+
+        return _Vad()
+
+    def _pipe(self, vad=None, **kw):
+        if vad is None:
+            vad = self._vad()
+        return MlxWhisperPipeline(
+            model_path="mlx-community/whisper-small",
+            vad=vad,
+            vad_params={"vad_onset": 0.5, "vad_offset": 0.363},
+            mlx_options={"temperature": 0.0},
+            **kw,
+        )
+
+    def test_verbose_true_prints_transcript(self, monkeypatch, capsys):
+        pipe = self._pipe()
+        monkeypatch.setattr(
+            asr_mod.mlx_whisper,
+            "transcribe",
+            lambda a, **k: {
+                "language": "en",
+                "segments": [{"text": "hello", "start": 0.0, "end": 0.5, "avg_logprob": -0.1}],
+            },
+        )
+        pipe.transcribe(np.zeros(16000, dtype=np.float32), verbose=True)
+        captured = capsys.readouterr()
+        assert "Transcript:" in captured.out
+        assert "hello" in captured.out
+
+    def test_verbose_default_false_no_print(self, monkeypatch, capsys):
+        pipe = self._pipe()
+        monkeypatch.setattr(
+            asr_mod.mlx_whisper,
+            "transcribe",
+            lambda a, **k: {
+                "language": "en",
+                "segments": [{"text": "hello", "start": 0.0, "end": 0.5}],
+            },
+        )
+        pipe.transcribe(np.zeros(16000, dtype=np.float32))
+        captured = capsys.readouterr()
+        assert "Transcript:" not in captured.out
+
+    def test_print_progress_true_prints_progress(self, monkeypatch, capsys):
+        pipe = self._pipe()
+        monkeypatch.setattr(
+            asr_mod.mlx_whisper,
+            "transcribe",
+            lambda a, **k: {
+                "language": "en",
+                "segments": [{"text": "x", "start": 0.0, "end": 1.0}],
+            },
+        )
+        pipe.transcribe(np.zeros(16000, dtype=np.float32), print_progress=True)
+        captured = capsys.readouterr()
+        assert "Progress:" in captured.out
+        assert "100.00%" in captured.out
+
+    def test_print_progress_combined_offsets(self, monkeypatch, capsys):
+        pipe = self._pipe()
+        monkeypatch.setattr(
+            asr_mod.mlx_whisper,
+            "transcribe",
+            lambda a, **k: {
+                "language": "en",
+                "segments": [{"text": "x", "start": 0.0, "end": 1.0}],
+            },
+        )
+        pipe.transcribe(
+            np.zeros(16000, dtype=np.float32), print_progress=True, combined_progress=True
+        )
+        captured = capsys.readouterr()
+        # base=100, combined -> 100/2 = 50.00%.
+        assert "50.00%" in captured.out
+
+    def test_num_workers_positive_logs(self, monkeypatch, capsys):
+        import logging
+        import sys
+
+        root_logger = logging.getLogger("whisperx")
+        root_logger.setLevel(logging.INFO)
+        # Rebind the StreamHandler to the current (pytest-captured) stdout.
+        for h in root_logger.handlers:
+            if isinstance(h, logging.StreamHandler):
+                h.stream = sys.stdout
+        pipe = self._pipe()
+        monkeypatch.setattr(
+            asr_mod.mlx_whisper,
+            "transcribe",
+            lambda a, **k: {"language": "en", "segments": []},
+        )
+        pipe.transcribe(np.zeros(16000, dtype=np.float32), num_workers=4)
+        captured = capsys.readouterr()
+        assert "num_workers" in captured.out
+
+    def test_batch_size_gt_one_logs_ignored(self, monkeypatch, capsys):
+        import logging
+        import sys
+
+        root_logger = logging.getLogger("whisperx")
+        root_logger.setLevel(logging.INFO)
+        for h in root_logger.handlers:
+            if isinstance(h, logging.StreamHandler):
+                h.stream = sys.stdout
+        pipe = self._pipe()
+        monkeypatch.setattr(
+            asr_mod.mlx_whisper,
+            "transcribe",
+            lambda a, **k: {"language": "en", "segments": []},
+        )
+        pipe.transcribe(np.zeros(16000, dtype=np.float32), batch_size=8)
+        captured = capsys.readouterr()
+        assert "batch_size" in captured.out
+
+    def test_task_defaults_to_transcribe(self, monkeypatch):
+        pipe = self._pipe()
+        captured: dict = {}
+
+        def fake(a, **k):
+            captured.update(k)
+            return {"language": "en", "segments": []}
+
+        monkeypatch.setattr(asr_mod.mlx_whisper, "transcribe", fake)
+        pipe.transcribe(np.zeros(16000, dtype=np.float32))
+        # task=None arg -> "transcribe" passed to mlx_whisper.
+        assert captured["task"] == "transcribe"
+
+    def test_explicit_task_translate_passed_through(self, monkeypatch):
+        pipe = self._pipe()
+        captured: dict = {}
+
+        def fake(a, **k):
+            captured.update(k)
+            return {"language": "en", "segments": []}
+
+        monkeypatch.setattr(asr_mod.mlx_whisper, "transcribe", fake)
+        pipe.transcribe(np.zeros(16000, dtype=np.float32), task="translate")
+        assert captured["task"] == "translate"
+
+    def test_language_detected_when_none(self, monkeypatch):
+        pipe = self._pipe(language=None)
+        monkeypatch.setattr(
+            asr_mod.mlx_whisper,
+            "transcribe",
+            lambda a, **k: {
+                "language": "de",
+                "segments": [{"text": "hallo", "start": 0.0, "end": 1.0}],
+            },
+        )
+        result = pipe.transcribe(np.zeros(16000, dtype=np.float32))
+        assert result["language"] == "de"
+
+    def test_avg_logprop_passed_through_as_float(self, monkeypatch):
+        pipe = self._pipe()
+        monkeypatch.setattr(
+            asr_mod.mlx_whisper,
+            "transcribe",
+            lambda a, **k: {
+                "language": "en",
+                "segments": [{"text": "hi", "start": 0.0, "end": 1.0, "avg_logprob": -0.7}],
+            },
+        )
+        result = pipe.transcribe(np.zeros(16000, dtype=np.float32))
+        assert result["segments"][0]["avg_logprob"] == -0.7
+
+    def test_avg_logprob_none_stays_none(self, monkeypatch):
+        pipe = self._pipe()
+        monkeypatch.setattr(
+            asr_mod.mlx_whisper,
+            "transcribe",
+            lambda a, **k: {
+                "language": "en",
+                "segments": [{"text": "hi", "start": 0.0, "end": 1.0}],
+            },
+        )
+        result = pipe.transcribe(np.zeros(16000, dtype=np.float32))
+        assert result["segments"][0]["avg_logprob"] is None

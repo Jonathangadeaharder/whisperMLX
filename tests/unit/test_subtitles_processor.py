@@ -250,3 +250,197 @@ class TestSave:
         count = proc.save(str(out_path), advanced_splitting=False)
         # process_segments returns one subtitle in the non-advanced path.
         assert count == len(proc.process_segments(advanced_splitting=False))
+
+
+# Default-argument and content-asserting tests: kill default-value mutants
+# and split-point/save mutants by asserting exact content.
+
+
+class TestSubtitlesProcessorDefaults:
+    def test_default_max_line_length_is_45(self):
+        proc = SubtitlesProcessor([{"start": 0.0, "end": 1.0, "text": "hi"}], "en")
+        assert proc.max_line_length == 45
+        assert proc.min_char_length_splitter == 30
+        assert proc.is_vtt is False
+
+    def test_default_is_vtt_false_uses_comma_in_save(self, tmp_path):
+        seg = {
+            "start": 0.0,
+            "end": 2.0,
+            "text": "hello world",
+            "words": [
+                {"word": "hello", "start": 0.0, "end": 1.0, "score": 1.0},
+                {"word": "world", "start": 1.0, "end": 2.0, "score": 1.0},
+            ],
+        }
+        out_path = tmp_path / "out.srt"
+        proc = SubtitlesProcessor([seg], "en")
+        proc.save(str(out_path))
+        text = out_path.read_text(encoding="utf-8")
+        assert "WEBVTT" not in text
+        assert "," in text
+        # The timestamp line uses a comma decimal marker, not a dot.
+        ts_line = next(ln for ln in text.splitlines() if "-->" in ln)
+        assert "." not in ts_line.split(" --> ")[0]
+
+    def test_comma_set_from_lang(self):
+        proc = SubtitlesProcessor([{"start": 0.0, "end": 1.0, "text": "hi"}], "en")
+        assert proc.comma == ","
+
+    def test_conjunctions_set_from_lang(self):
+        proc = SubtitlesProcessor([{"start": 0.0, "end": 1.0, "text": "hi"}], "en")
+        assert "and" in proc.conjunctions
+
+
+class TestDetermineAdvancedSplitPointsPlainWords:
+    def test_plain_words_uses_text_split(self):
+        text = " ".join(f"word{i}" for i in range(12))
+        seg = {"start": 0.0, "end": 6.0, "text": text}
+        proc = SubtitlesProcessor([seg], "en", max_line_length=20, min_char_length_splitter=5)
+        sp = proc.determine_advanced_split_points(seg)
+        assert isinstance(sp, list)
+        assert len(sp) >= 1
+
+    def test_plain_words_generate_subtitles_proportional_timing(self):
+        text = "alpha beta gamma delta"
+        seg = {"start": 0.0, "end": 4.0, "text": text}
+        proc = SubtitlesProcessor([seg], "en", max_line_length=15, min_char_length_splitter=3)
+        sp = proc.determine_advanced_split_points(seg)
+        subs = proc.generate_subtitles_from_split_points(seg, sp)
+        assert len(subs) >= 1
+        assert subs[0]["start"] == 0.0
+        assert subs[-1]["end"] <= 4.0  # pyrefly: ignore[unsupported-operation]
+        for s in subs:
+            assert s["text"]
+
+    def test_japanese_plain_words_no_space_prefix(self):
+        seg = {"start": 0.0, "end": 2.0, "text": "こんにちは世界"}
+        proc = SubtitlesProcessor([seg], "ja", max_line_length=20, min_char_length_splitter=5)
+        sp = proc.determine_advanced_split_points(seg)
+        subs = proc.generate_subtitles_from_split_points(seg, sp)
+        assert len(subs) >= 1
+        assert subs[0]["text"] == "こんにちは世界"
+
+
+class TestSaveDefaultFilename:
+    def test_save_default_filename_is_subtitles_srt(self, tmp_path):
+        seg = {
+            "start": 0.0,
+            "end": 1.0,
+            "text": "hi",
+            "words": [{"word": "hi", "start": 0.0, "end": 1.0, "score": 1.0}],
+        }
+        proc = SubtitlesProcessor([seg], "en")
+        # Pass explicit filename in tmp_path to avoid os.chdir (unsafe under
+        # parallel mutation runs). The default is "subtitles.srt".
+        out_path = tmp_path / "subtitles.srt"
+        count = proc.save(str(out_path))
+        assert out_path.exists()
+        assert count >= 1
+
+    def test_save_default_filename_signature(self):
+        import inspect
+
+        sig = inspect.signature(SubtitlesProcessor.save)
+        assert sig.parameters["filename"].default == "subtitles.srt"
+        assert sig.parameters["advanced_splitting"].default is True
+
+    def test_save_writes_exact_srt_block(self, tmp_path):
+        seg = {
+            "start": 0.0,
+            "end": 2.0,
+            "text": "hello world",
+            "words": [
+                {"word": "hello", "start": 0.0, "end": 1.0, "score": 1.0},
+                {"word": "world", "start": 1.0, "end": 2.0, "score": 1.0},
+            ],
+        }
+        out_path = tmp_path / "sub.srt"
+        proc = SubtitlesProcessor([seg], "en", max_line_length=100)
+        proc.save(str(out_path))
+        text = out_path.read_text(encoding="utf-8")
+        assert "1" in text.splitlines()[0]
+        assert "-->" in text
+        assert "hello world" in text
+        assert text.endswith(("\n", "\n\n"))
+
+    def test_save_vtt_header_only_when_is_vtt(self, tmp_path):
+        seg = {
+            "start": 0.0,
+            "end": 1.0,
+            "text": "hi",
+            "words": [{"word": "hi", "start": 0.0, "end": 1.0, "score": 1.0}],
+        }
+        out_srt = tmp_path / "a.srt"
+        out_vtt = tmp_path / "b.vtt"
+        proc_srt = SubtitlesProcessor([seg], "en", is_vtt=False)
+        proc_vtt = SubtitlesProcessor([seg], "en", is_vtt=True)
+        proc_srt.save(str(out_srt))
+        proc_vtt.save(str(out_vtt))
+        srt_text = out_srt.read_text(encoding="utf-8")
+        vtt_text = out_vtt.read_text(encoding="utf-8")
+        assert "WEBVTT" not in srt_text
+        assert vtt_text.startswith("WEBVTT")
+
+
+class TestGenerateSubtitlesFromSplitPointsEdges:
+    def test_no_split_points_returns_last_fragment(self):
+        words = [
+            {"word": "hello", "start": 0.0, "end": 0.5, "score": 1.0},
+            {"word": "world", "start": 0.5, "end": 1.0, "score": 1.0},
+        ]
+        seg = {"start": 0.0, "end": 1.0, "text": "hello world", "words": words}
+        proc = SubtitlesProcessor([seg], "en")
+        subs = proc.generate_subtitles_from_split_points(seg, [])
+        assert len(subs) == 1
+        assert subs[0]["start"] == 0.0
+        assert subs[0]["end"] == 1.0
+        assert subs[0]["text"] == "hello world"
+
+    def test_next_start_time_extends_end(self):
+        words = [
+            {"word": "hello", "start": 0.0, "end": 0.5, "score": 1.0},
+            {"word": "world", "start": 0.5, "end": 1.0, "score": 1.0},
+        ]
+        seg = {"start": 0.0, "end": 1.0, "text": "hello world", "words": words}
+        proc = SubtitlesProcessor([seg], "en")
+        subs = proc.generate_subtitles_from_split_points(seg, [], next_start_time=1.3)
+        assert subs[0]["end"] == 1.3
+
+    def test_dict_words_use_word_timestamps(self):
+        words = [
+            {"word": "alpha", "start": 0.5, "end": 1.0, "score": 1.0},
+            {"word": "beta", "start": 1.0, "end": 1.5, "score": 1.0},
+        ]
+        seg = {"start": 0.0, "end": 2.0, "text": "alpha beta", "words": words}
+        proc = SubtitlesProcessor([seg], "en", max_line_length=100)
+        sp = proc.determine_advanced_split_points(seg)
+        subs = proc.generate_subtitles_from_split_points(seg, sp)
+        for s in subs:
+            assert s["start"] in (0.5, 1.0)
+
+
+class TestEstimateTimestampForWordEdges:
+    def test_first_word_no_prev_uses_next_only(self):
+        words = [
+            {"word": "bb"},
+            {"word": "c", "start": 1.0, "end": 1.5},
+        ]
+        proc = SubtitlesProcessor(
+            [{"start": 0.0, "end": 2.0, "text": "bb c", "words": words}], "en"
+        )
+        proc.estimate_timestamp_for_word(words, 0)
+        assert words[0]["end"] == 1.0
+        assert words[0]["start"] == 1.0 - len("bb") * 0.25
+
+    def test_word_length_affects_end_time(self):
+        words = [
+            {"word": "a", "start": 0.0, "end": 0.5},
+            {"word": "bbbb"},
+        ]
+        proc = SubtitlesProcessor(
+            [{"start": 0.0, "end": 5.0, "text": "a bbbb", "words": words}], "en"
+        )
+        proc.estimate_timestamp_for_word(words, 1)
+        assert words[1]["start"] == 0.5
+        assert words[1]["end"] == 0.5 + len("bbbb") * 0.25

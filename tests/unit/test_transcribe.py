@@ -402,3 +402,143 @@ class TestTemperatureHandling:
             tr.transcribe_task(args, _make_parser())
         temps = lm.call_args.kwargs["asr_options"]["temperatures"]
         assert list(temps) == [0.5]
+
+
+# Real output-dir and default-wiring tests: kill makedirs/pop/propagation
+# mutants by using a real tmp output dir and asserting on writer call args.
+
+
+class TestTranscribeTaskRealOutputDir:
+    def test_makedirs_creates_output_dir(self, mock_asr_pipeline, tmp_path):
+        # Use a real (non-existent) subdir so os.makedirs(exist_ok=True) runs.
+        out = tmp_path / "new_subdir"
+        args = _base_args(output_dir=str(out), no_align=True)
+        with (
+            patch("whisperx.transcribe.load_model", return_value=mock_asr_pipeline),
+            patch("whisperx.transcribe.load_audio", return_value=np.zeros(16000, dtype=np.float32)),
+            patch("whisperx.transcribe.get_writer"),
+        ):
+            tr.transcribe_task(args, _make_parser())
+        # The output dir was actually created (makedirs ran with exist_ok=True).
+        assert out.is_dir()
+
+    def test_makedirs_exist_ok_re_runs(self, mock_asr_pipeline, tmp_path):
+        # An already-existing dir must not raise (exist_ok=True).
+        out = tmp_path / "exists"
+        out.mkdir()
+        args = _base_args(output_dir=str(out), no_align=True)
+        with (
+            patch("whisperx.transcribe.load_model", return_value=mock_asr_pipeline),
+            patch("whisperx.transcribe.load_audio", return_value=np.zeros(16000, dtype=np.float32)),
+            patch("whisperx.transcribe.get_writer"),
+        ):
+            # Should not raise even though the dir exists.
+            tr.transcribe_task(args, _make_parser())
+        assert out.is_dir()
+
+
+class TestTranscribeTaskPropagatesOptions:
+    def test_print_progress_passed_to_align_and_transcribe(self, mock_asr_pipeline, tmp_path):
+        args = _base_args(output_dir=str(tmp_path), no_align=False, print_progress=True)
+        with (
+            patch("whisperx.transcribe.load_model", return_value=mock_asr_pipeline),
+            patch("whisperx.transcribe.load_audio", return_value=np.zeros(16000, dtype=np.float32)),
+            patch("whisperx.transcribe.os.makedirs"),
+            patch("whisperx.transcribe.get_writer"),
+            patch("whisperx.transcribe.load_align_model") as la,
+            patch("whisperx.transcribe.align") as al,
+        ):
+            la.return_value = (MagicMock(), {"language": "en", "dictionary": {}, "type": "hf"})
+            al.return_value = {"segments": [], "word_segments": []}
+            tr.transcribe_task(args, _make_parser())
+        # align() called with print_progress=True.
+        assert al.call_args.kwargs.get("print_progress") is True
+
+    def test_return_char_alignments_passed_to_align(self, mock_asr_pipeline, tmp_path):
+        args = _base_args(output_dir=str(tmp_path), no_align=False, return_char_alignments=True)
+        with (
+            patch("whisperx.transcribe.load_model", return_value=mock_asr_pipeline),
+            patch("whisperx.transcribe.load_audio", return_value=np.zeros(16000, dtype=np.float32)),
+            patch("whisperx.transcribe.os.makedirs"),
+            patch("whisperx.transcribe.get_writer"),
+            patch("whisperx.transcribe.load_align_model") as la,
+            patch("whisperx.transcribe.align") as al,
+        ):
+            la.return_value = (MagicMock(), {"language": "en", "dictionary": {}, "type": "hf"})
+            al.return_value = {"segments": [], "word_segments": []}
+            tr.transcribe_task(args, _make_parser())
+        assert al.call_args.kwargs.get("return_char_alignments") is True
+
+    def test_interpolate_method_passed_to_align(self, mock_asr_pipeline, tmp_path):
+        args = _base_args(output_dir=str(tmp_path), no_align=False, interpolate_method="linear")
+        with (
+            patch("whisperx.transcribe.load_model", return_value=mock_asr_pipeline),
+            patch("whisperx.transcribe.load_audio", return_value=np.zeros(16000, dtype=np.float32)),
+            patch("whisperx.transcribe.os.makedirs"),
+            patch("whisperx.transcribe.get_writer"),
+            patch("whisperx.transcribe.load_align_model") as la,
+            patch("whisperx.transcribe.align") as al,
+        ):
+            la.return_value = (MagicMock(), {"language": "en", "dictionary": {}, "type": "hf"})
+            al.return_value = {"segments": [], "word_segments": []}
+            tr.transcribe_task(args, _make_parser())
+        assert al.call_args.kwargs.get("interpolate_method") == "linear"
+
+    def test_verbose_passed_to_transcribe(self, mock_asr_pipeline, tmp_path):
+        args = _base_args(output_dir=str(tmp_path), no_align=True, verbose=True)
+        with (
+            patch("whisperx.transcribe.load_model", return_value=mock_asr_pipeline),
+            patch("whisperx.transcribe.load_audio", return_value=np.zeros(16000, dtype=np.float32)),
+            patch("whisperx.transcribe.os.makedirs"),
+            patch("whisperx.transcribe.get_writer"),
+        ):
+            tr.transcribe_task(args, _make_parser())
+        # model.transcribe called with verbose=True.
+        assert mock_asr_pipeline.transcribe.call_args.kwargs.get("verbose") is True
+
+    def test_chunk_size_passed_to_transcribe_and_load_model(self, mock_asr_pipeline, tmp_path):
+        args = _base_args(output_dir=str(tmp_path), no_align=True, chunk_size=15)
+        with (
+            patch("whisperx.transcribe.load_model", return_value=mock_asr_pipeline) as lm,
+            patch("whisperx.transcribe.load_audio", return_value=np.zeros(16000, dtype=np.float32)),
+            patch("whisperx.transcribe.os.makedirs"),
+            patch("whisperx.transcribe.get_writer"),
+        ):
+            tr.transcribe_task(args, _make_parser())
+        # load_model vad_options carries chunk_size=15.
+        assert lm.call_args.kwargs["vad_options"]["chunk_size"] == 15
+        # model.transcribe called with chunk_size=15.
+        assert mock_asr_pipeline.transcribe.call_args.kwargs.get("chunk_size") == 15
+
+    def test_default_language_en_when_none(self, mock_asr_pipeline, tmp_path):
+        # language=None -> align_language defaults to "en".
+        args = _base_args(output_dir=str(tmp_path), no_align=False, language=None)
+        with (
+            patch("whisperx.transcribe.load_model", return_value=mock_asr_pipeline),
+            patch("whisperx.transcribe.load_audio", return_value=np.zeros(16000, dtype=np.float32)),
+            patch("whisperx.transcribe.os.makedirs"),
+            patch("whisperx.transcribe.get_writer"),
+            patch("whisperx.transcribe.load_align_model") as la,
+            patch("whisperx.transcribe.align") as al,
+        ):
+            la.return_value = (MagicMock(), {"language": "en", "dictionary": {}, "type": "hf"})
+            al.return_value = {"segments": [], "word_segments": []}
+            tr.transcribe_task(args, _make_parser())
+        # load_align_model called with the default align_language "en".
+        assert la.call_args.args[0] == "en"
+
+    def test_result_language_set_to_align_language(self, mock_asr_pipeline, tmp_path):
+        # The writer result["language"] is forced to align_language.
+        args = _base_args(output_dir=str(tmp_path), no_align=True, language="fr")
+        with (
+            patch("whisperx.transcribe.load_model", return_value=mock_asr_pipeline),
+            patch("whisperx.transcribe.load_audio", return_value=np.zeros(16000, dtype=np.float32)),
+            patch("whisperx.transcribe.os.makedirs"),
+            patch("whisperx.transcribe.get_writer") as gw,
+        ):
+            writer = MagicMock()
+            gw.return_value = writer
+            tr.transcribe_task(args, _make_parser())
+        # writer called with a result dict whose language == "fr".
+        result_arg = writer.call_args.args[0]
+        assert result_arg["language"] == "fr"
