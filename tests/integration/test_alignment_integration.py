@@ -243,7 +243,6 @@ class TestAlignFullFlow:
         assert len(result["segments"]) >= 1
 
 
-
 # Real-model integration tests: load wav2vec2-base-960h from HF cache and
 # exercise load_align_model + align() without mocking transformers.
 
@@ -264,6 +263,7 @@ def _real_audio(seconds: float, sr: int = 16000) -> torch.Tensor:
 
 
 pytestmark = pytest.mark.slow
+
 
 class TestLoadAlignModelReal:
     def test_loads_real_model_with_default_args(self):
@@ -292,6 +292,7 @@ class TestLoadAlignModelReal:
 
 
 pytestmark = pytest.mark.slow
+
 
 class TestAlignRealModelDefaults:
     def test_align_with_all_default_kwargs(self, real_align_model_and_metadata):
@@ -406,6 +407,7 @@ class TestAlignRealModelDefaults:
 
 
 pytestmark = pytest.mark.slow
+
 
 class TestAlignPunktDownloadPath:
     """Exercise the NLTK punkt_tab download fallback (LookupError branch)."""
