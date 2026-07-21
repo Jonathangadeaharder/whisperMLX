@@ -155,8 +155,8 @@ system_encoding = sys.getdefaultencoding()
 if system_encoding != "utf-8":
 
     def make_safe(string):
-        # replaces any character not representable using the system default encoding with an '?',
-        # avoiding UnicodeEncodeError (https://github.com/openai/whisper/discussions/729).
+        # Replace chars not representable in the default encoding with '?',
+        # avoiding UnicodeEncodeError.
         return string.encode(system_encoding, errors="replace").decode(system_encoding)
 
 else:
@@ -417,7 +417,7 @@ class WriteAudacity(ResultWriter):
     extension: str = "aud"
 
     def write_result(self, result: dict, file: TextIO, options: dict):  # noqa: ARG002
-        ARROW = "\t"  # noqa: N806 - label separator, conventional name
+        ARROW = "\t"  # noqa: N806
         for segment in result["segments"]:
             print(segment["start"], file=file, end=ARROW)
             print(segment["end"], file=file, end=ARROW)

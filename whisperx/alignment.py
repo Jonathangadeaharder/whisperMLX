@@ -122,7 +122,8 @@ def load_align_model(
     return align_model, align_metadata
 
 
-def align(  # noqa: PLR0912, PLR0915 - complex CTC alignment loop, split hurts readability
+# Complex CTC alignment loop; split hurts readability.
+def align(  # noqa: PLR0912, PLR0915
     transcript: Iterable[SingleSegment],
     model: torch.nn.Module,
     align_model_metadata: dict,
@@ -194,13 +195,9 @@ def align(  # noqa: PLR0912, PLR0915 - complex CTC alignment loop, split hurts r
                 char_ = char_.replace(" ", "|")
 
             # ignore whitespace at beginning and end of transcript
-            if cdx < num_leading or cdx > len(text) - num_trailing - 1:
-                pass
-            elif char_ in model_dictionary:
-                clean_char.append(char_)
-                clean_cdx.append(cdx)
-            elif char_ not in (" ", "|"):
-                # unknown char (digit, symbol, foreign script) — use wildcard
+            if num_leading <= cdx <= len(text) - num_trailing - 1 and (
+                char_ in model_dictionary or char_ not in (" ", "|")
+            ):
                 clean_char.append(char_)
                 clean_cdx.append(cdx)
 
@@ -258,7 +255,7 @@ def align(  # noqa: PLR0912, PLR0915 - complex CTC alignment loop, split hurts r
         f1 = int(t1 * SAMPLE_RATE)
         f2 = int(t2 * SAMPLE_RATE)
 
-        # TODO: Probably can get some speedup gain with batched inference here
+        # Batched inference here could yield speedup (future work).
         waveform_segment = audio[:, f1:f2]
         # Handle the minimum input length for wav2vec2 models
         if waveform_segment.shape[-1] < 400:

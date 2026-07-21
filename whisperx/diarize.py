@@ -44,7 +44,7 @@ class IntervalTree:
         candidates = slice(0, right_idx)
         overlaps = (self.starts[candidates] < end) & (self.ends[candidates] > start)
         results = []
-        for idx in np.where(overlaps)[0]:
+        for idx in np.nonzero(overlaps)[0]:
             intersection = min(self.ends[idx], end) - max(self.starts[idx], start)
             if intersection > 0:
                 results.append((self.speakers[idx], intersection))
@@ -68,10 +68,10 @@ class DiarizationPipeline:
 
     def __init__(
         self,
-        model_name=None,  # noqa: ARG002 - kept for whisperX API conformance
-        token=None,  # noqa: ARG002 - kept for whisperX API conformance
-        device=None,  # noqa: ARG002 - kept for whisperX API conformance
-        cache_dir=None,  # noqa: ARG002 - kept for whisperX API conformance
+        model_name=None,  # noqa: ARG002
+        token=None,  # noqa: ARG002
+        device=None,  # noqa: ARG002
+        cache_dir=None,  # noqa: ARG002
     ):
         # Lazy imports: mlx/weights load only when diarization is used.
         from whisperx.mlx_models.pyannote_segmentation import segment_audio  # noqa: PLC0415
@@ -101,7 +101,8 @@ class DiarizationPipeline:
         segments = binarize(scores, frame_times)
         return [(float(s.start), float(s.end)) for s in segments]
 
-    def __call__(  # noqa: PLR0912, PLR0915 - diarization pipeline, split hurts flow
+    # Diarization pipeline; split hurts flow.
+    def __call__(  # noqa: PLR0912, PLR0915
         self,
         audio: str | np.ndarray,
         num_speakers: int | None = None,
@@ -256,7 +257,7 @@ class DiarizationPipeline:
         return best_n
 
 
-def assign_word_speakers(  # noqa: PLR0912 - speaker assignment has many branches
+def assign_word_speakers(  # noqa: PLR0912
     diarize_df: pd.DataFrame,
     transcript_result: AlignedTranscriptionResult | TranscriptionResult,
     speaker_embeddings: dict[str, list[float]] | None = None,
