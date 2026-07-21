@@ -5,6 +5,7 @@ mocked; the pure clustering + interval-tree logic is the behavior under test.
 
 from __future__ import annotations
 
+import sys
 from unittest.mock import MagicMock, patch
 
 import numpy as np
@@ -368,6 +369,10 @@ class TestEstimateClusters:
         assert n == 1
 
 
+@pytest.mark.skipif(
+    sys.platform != "darwin",
+    reason="DiarizationPipeline.__call__ lazy-imports mlx.core",
+)
 class TestDiarizationPipelineCall:
     def _make_pipeline(self, monkeypatch, segment_result=None, embeddings=None):
         pipe = DiarizationPipeline.__new__(DiarizationPipeline)

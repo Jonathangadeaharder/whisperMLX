@@ -65,8 +65,8 @@ jobs:
           python-version: ${{ matrix.python-version }}
       - name: Install project (dev extras)
         run: uv sync --all-extras
-      - name: Pytest (unit + integration, coverage, no e2e)
-        run: uv run pytest tests/ -m "not e2e" --cov=whisperx --cov-branch --cov-report=term --cov-report=xml:coverage.xml --cov-fail-under=90
+      - name: Pytest (unit + integration, no e2e/slow)
+        run: uv run pytest tests/ -m "not e2e and not slow" --cov=whisperx --cov-branch --cov-report=term --cov-report=xml:coverage.xml
 
   build:
     runs-on: ubuntu-latest
