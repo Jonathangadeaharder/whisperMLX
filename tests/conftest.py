@@ -9,10 +9,24 @@ module top-level here.
 from __future__ import annotations
 
 import contextlib
+import sys
 import wave
 from collections.abc import Iterator
 
 import numpy as np
+
+# MLX is Apple Silicon only. Tests that import whisperx.asr / whisperx.vads
+# pull in mlx_whisper -> mlx.core, which fails on Linux CI. Skip those
+# modules at collection time on non-darwin platforms.
+if sys.platform != "darwin":
+    collect_ignore_glob = [
+        "unit/test_asr.py",
+        "unit/test_mlx_forward.py",
+        "unit/test_pyannote_segmentation.py",
+        "unit/test_silero_vad.py",
+        "unit/test_transcribe.py",
+        "integration/test_vad_asr_integration.py",
+    ]
 import pytest
 
 SAMPLE_RATE = 16000
