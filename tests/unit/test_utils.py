@@ -1293,6 +1293,24 @@ class TestInterpolateNansEdges:
         assert out.notna().all()
         assert out.iloc[1] == 5.0
 
+    def test_single_nonnull_uses_ffill_bfill_not_interpolate(self):
+        # mutmut_6: > 1 -> >= 1. With exactly 1 non-null, correct takes the
+        # ffill/bfill branch. Equivalent here (both paths fill same value).
+        s = pd.Series([np.nan, 5.0, np.nan])
+        out = interpolate_nans(s, method="nearest")
+        assert out.notna().all()
+        assert (out == 5.0).all()
+
+    def test_default_method_is_nearest(self):
+        # mutmut_1/2: method="nearest" default mutated. Call without method;
+        # correct uses "nearest" (interpolate works). Mutant uses invalid
+        # method -> interpolate raises or behaves differently.
+        s = pd.Series([0.0, np.nan, 10.0])
+        out = interpolate_nans(s)
+        # nearest interpolation fills the middle with the nearest non-null.
+        assert out.notna().all()
+        assert out.iloc[1] in (0.0, 10.0)
+
 
 class TestFormatTimestampEdges:
     def test_just_under_one_hour_no_hours_marker(self):

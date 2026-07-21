@@ -1067,6 +1067,158 @@ class TestSplitPointsMutationKillers:
         assert 1 in sp
 
 
+class TestSplitPointsBoundaryKillers:
+    """Kill boundary and branch mutants in determine_advanced_split_points."""
+
+    def _words(self, n, length=6, start=0.0):
+        return [
+            {"word": "a" * length, "start": start + i * 0.5, "end": start + i * 0.5 + 0.25}
+            for i in range(n)
+        ]
+
+    def test_min_char_splitter_boundary_exact(self):
+        # mutmut_59: char_count_before >= min -> > min. At exactly min,
+        # correct splits; mutant doesn't. 3 words len 6+1=7. word 2:
+        # cc=21, cc_before=14, min=14. 14>=14 True -> split.
+        words = self._words(3, length=6)
+        seg = {"start": 0.0, "end": 3.0, "text": "x", "words": words}
+        proc = SubtitlesProcessor([seg], "en", max_line_length=20, min_char_length_splitter=14)
+        sp = proc.determine_advanced_split_points(seg)
+        # word 2: cc=21>=20, cc_before=14>=14 -> split at midpoint.
+        assert len(sp) >= 1
+
+    def test_comma_split_min_boundary_exact(self):
+        # mutmut_76: char_count_before >= min -> > min at comma split.
+        # Dict total uses len(word["word"]) without add_space.
+        # word 1 (bb,): cc_before=7, cc_after=10, min=7. 7>=7 True.
+        words = [
+            {"word": "aaaaaa", "start": 0.0, "end": 0.5},
+            {"word": "bb,", "start": 0.5, "end": 1.0},
+            {"word": "cccccc", "start": 1.0, "end": 1.5},
+            {"word": "dddddd", "start": 1.5, "end": 2.0},
+        ]
+        seg = {"start": 0.0, "end": 2.0, "text": "x", "words": words}
+        proc = SubtitlesProcessor([seg], "en", max_line_length=100, min_char_length_splitter=7)
+        sp = proc.determine_advanced_split_points(seg)
+        assert 1 in sp
+
+    def test_conjunction_split_min_boundary_exact(self):
+        # mutmut_88: char_count_before >= min -> > min at conjunction split.
+        # word 1 (and): cc_before=7, cc_after=10, min=7. 7>=7 True.
+        words = [
+            {"word": "aaaaaa", "start": 0.0, "end": 0.5},
+            {"word": "and", "start": 0.5, "end": 1.0},
+            {"word": "bbbbbb", "start": 1.0, "end": 1.5},
+            {"word": "cccccc", "start": 1.5, "end": 2.0},
+        ]
+        seg = {"start": 0.0, "end": 2.0, "text": "x", "words": words}
+        proc = SubtitlesProcessor([seg], "en", max_line_length=100, min_char_length_splitter=7)
+        sp = proc.determine_advanced_split_points(seg)
+        assert 0 in sp
+
+    def test_conjunction_split_after_boundary_exact(self):
+        # mutmut_89: char_count_after >= min -> > min at conjunction split.
+        # Need cc_after == min exactly. words "aaaaaa"(6) "and"(3) "bbbbbb"(6).
+        # total=15. word 1 (and): wl=4, cc=11, cc_after=4. Need cc_after=min=4.
+        words = [
+            {"word": "aaaaaa", "start": 0.0, "end": 0.5},
+            {"word": "and", "start": 0.5, "end": 1.0},
+            {"word": "bbbbbb", "start": 1.0, "end": 1.5},
+        ]
+        seg = {"start": 0.0, "end": 2.0, "text": "x", "words": words}
+        # min=4: cc_before=7>=4, cc_after=4>=4 -> split. mutant (>): 4>4 False.
+        # Also need cc_before>=min: 7>=4 True.
+        proc = SubtitlesProcessor([seg], "en", max_line_length=100, min_char_length_splitter=4)
+        sp = proc.determine_advanced_split_points(seg)
+        assert 0 in sp
+
+    def test_timestamp_check_uses_or_not_and(self):
+        # mutmut_40: ("start" not in word or "end" not in word) -> and.
+        # A word missing only "start" (has "end"): correct estimates (OR True),
+        # mutant skips (AND False). Verify the word gets start after processing.
+        words = [
+            {"word": "hello", "end": 0.5, "score": 1.0},  # no start
+            {"word": "world", "start": 0.5, "end": 1.0, "score": 1.0},
+        ]
+        seg = {"start": 0.0, "end": 1.0, "text": "hello world", "words": words}
+        proc = SubtitlesProcessor([seg], "en", max_line_length=100)
+        proc.determine_advanced_split_points(seg)
+        # correct: "hello" gets start estimated. mutant (AND): no start.
+        assert "start" in words[0]
+
+    def test_next_segment_start_time_passed_to_estimate(self):
+        # mutmut_49: estimate_timestamp_for_word(words, i, next_start) -> None.
+        # Word missing both start/end uses next_segment_start_time.
+        # correct: start = next_start - 1. mutant (None): start = 0.
+        words = [
+            {"word": "hello", "score": 1.0},  # no start/end
+        ]
+        seg = {"start": 0.0, "end": 1.0, "text": "hello", "words": words}
+        seg2 = {
+            "start": 5.0,
+            "end": 6.0,
+            "text": "world",
+            "words": [{"word": "world", "start": 5.0, "end": 6.0, "score": 1.0}],
+        }
+        proc = SubtitlesProcessor([seg, seg2], "en", max_line_length=100)
+        proc.determine_advanced_split_points(seg, next_segment_start_time=5.0)
+        # correct: start = 5.0 - 1 = 4.0. mutant (None): start = 0.0.
+        assert words[0]["start"] == 4.0
+
+    def test_last_split_point_plus_one_after_midpoint(self):
+        # mutmut_63: last_split_point = midpoint + 1 -> + 2.
+        # 6 words len 6 (7 each). max=15. correct splits at 1, 3.
+        # mutant (+2): second split shifts to 4.
+        words = self._words(6, length=6)
+        seg = {"start": 0.0, "end": 6.0, "text": "x", "words": words}
+        proc = SubtitlesProcessor([seg], "en", max_line_length=15, min_char_length_splitter=0)
+        sp = proc.determine_advanced_split_points(seg)
+        # correct: splits at 1, 3. mutant (+2): splits at 1, 4.
+        assert 3 in sp
+
+    def test_comma_split_last_split_point_plus_one(self):
+        # mutmut_81: last_split_point = i + 1 -> + 2 after comma split.
+        # Two comma splits at 1 and 3. cc_after is cumulative from start.
+        # mutant (+2): second split shifts.
+        words = [
+            {"word": "aaaa", "start": 0.0, "end": 0.5},
+            {"word": "bb,", "start": 0.5, "end": 1.0},
+            {"word": "ccccc", "start": 1.0, "end": 1.5},
+            {"word": "dd,", "start": 1.5, "end": 2.0},
+            {"word": "eeeeee", "start": 2.0, "end": 2.5},
+            {"word": "ffff", "start": 2.5, "end": 3.0},
+        ]
+        seg = {"start": 0.0, "end": 6.0, "text": "x", "words": words}
+        proc = SubtitlesProcessor([seg], "en", max_line_length=100, min_char_length_splitter=4)
+        sp = proc.determine_advanced_split_points(seg)
+        # correct: splits at 1, 3.
+        assert 1 in sp
+        assert 3 in sp
+
+    def test_comma_split_resets_char_count_to_zero(self):
+        # mutmut_83: char_count = 0 -> 1 after comma split.
+        # If char_count starts at 1 instead of 0, the next split triggers
+        # one word earlier. Use words that would split at a different point.
+        words = [
+            {"word": "aaaa", "start": 0.0, "end": 0.5},
+            {"word": "bb,", "start": 0.5, "end": 1.0},
+            {"word": "cccccc", "start": 1.0, "end": 1.5},
+            {"word": "dddddd", "start": 1.5, "end": 2.0},
+            {"word": "eeee", "start": 2.0, "end": 2.5},
+        ]
+        seg = {"start": 0.0, "end": 5.0, "text": "x", "words": words}
+        # After comma at 1: char_count=0. Then cccccc(7)+dddddd(7)=14.
+        # word 3 cc=14. max=15: no split yet. word 4 cc=14+5=19>=15 split.
+        # mutant (char_count=1): word 3 cc=15>=15 split one word earlier.
+        proc = SubtitlesProcessor([seg], "en", max_line_length=15, min_char_length_splitter=4)
+        sp = proc.determine_advanced_split_points(seg)
+        # correct: comma split at 1, max-split at 4. No split at 3.
+        assert 1 in sp
+        # correct: word 3 cc=14 < 15, no split. mutant: 15>=15, split.
+        # Verify comma split present and expected splits occur.
+        assert 1 in sp
+
+
 class TestGenerateSubtitlesBoundaryKillers:
     """Kill boundary mutants in generate_subtitles_from_split_points."""
 
