@@ -1410,7 +1410,7 @@ class TestProcessSegmentsKillers:
         subs2 = proc2.process_segments(advanced_splitting=True)
         # seg1 last fragment: end=2.0, next_start=2.5, gap=0.5 <= 0.8 -> extend.
         # Mutant (None): no extend, end stays 2.0.
-        last_seg1_end = max(s["end"] for s in subs2 if s["start"] < 2.5)
+        last_seg1_end = max(s["end"] for s in subs2 if s["start"] < 2.5)  # pyrefly: ignore[unsupported-operation]
         assert last_seg1_end == 2.5
 
     def test_process_segments_non_advanced_estimates_timestamps(self):
@@ -1433,3 +1433,127 @@ class TestProcessSegmentsKillers:
         assert "start" in seg["words"][1]
         assert "end" in seg["words"][1]
         assert len(subs) == 1
+
+
+class TestDetermineSplitPointsLangAddSpaceKillers:
+    """Kill lang/add_space mutants in determine_advanced_split_points.
+
+    Targets:
+    - mutmut_16: add_space = 0 if zh/ja else 1 -> 1 if zh/ja else 1
+    - mutmut_18/19/20/21: string mutations on "zh"/"ja" list literals
+    - mutmut_25: len(word) + add_space -> len(word) - add_space (total_char_count)
+    - mutmut_36: char_count_after -= word_length -> += word_length
+    - mutmut_66: len(words[j]) + add_space -> len(words[j]) - add_space
+    - mutmut_80: last_split_point = i + 1 -> i - 1 (comma split)
+    - mutmut_81: last_split_point = i + 1 -> i + 2 (comma split)
+    - mutmut_83: char_count = 0 -> char_count = 1 (after comma split)
+    """
+
+    def _seg(self, text, lang="en", **kw):
+        seg = {"start": 0.0, "end": 10.0, "text": text}
+        return seg, kw
+
+    def test_zh_lang_add_space_zero_no_space_prefix(self):
+        # mutmut_16: add_space = 0 if zh/ja else 1 -> 1 if zh/ja else 1.
+        # Belt-and-suspenders check on the 0/1 flip via split point.
+        text = " ".join(["aaa"] * 11)
+        seg = {"start": 0.0, "end": 11.0, "text": text}
+        proc = SubtitlesProcessor([seg], "zh", max_line_length=30, min_char_length_splitter=20)
+        sp = proc.determine_advanced_split_points(seg)
+        # Correct (add_space=0): [5]. Mutant (add_space=1): [4].
+        assert 5 in sp
+        assert 4 not in sp
+
+    def test_zh_lang_string_literal_mutation(self):
+        # mutmut_18: "zh" -> "XXzhXX" in lang check. zh forces max=30, min=20.
+        # 11 plain words of len 3. add_space=0: word 9 cc=30, mid=5.
+        # mutant (add_space=1): word 7 cc=32, mid=4.
+        text = " ".join(["aaa"] * 11)
+        seg = {"start": 0.0, "end": 11.0, "text": text}
+        proc = SubtitlesProcessor([seg], "zh", max_line_length=30, min_char_length_splitter=20)
+        sp = proc.determine_advanced_split_points(seg)
+        # Correct: [5]. Mutant 18 (and 16, 19): [4].
+        assert 5 in sp
+        assert 4 not in sp
+
+    def test_ja_lang_string_literal_mutation(self):
+        # mutmut_20/21: "ja" -> "XXjaXX" / "JA" in lang check. ja forces max=30.
+        # 11 plain words len 3. add_space=0: word 9 cc=30, mid=5.
+        # mutant (add_space=1): word 7 cc=32, mid=4.
+        text = " ".join(["aaa"] * 11)
+        seg = {"start": 0.0, "end": 11.0, "text": text}
+        proc = SubtitlesProcessor([seg], "ja", max_line_length=30, min_char_length_splitter=20)
+        sp = proc.determine_advanced_split_points(seg)
+        # Correct: [5]. Mutant 20/21: [4].
+        assert 5 in sp
+        assert 4 not in sp
+
+    def test_en_add_space_in_total_char_count_string_words(self):
+        # mutmut_25: len(word)+add_space -> len(word)-add_space in running
+        # char_count. Words "aaa bbb ccc" add_space=1 -> lengths 4. max=8:
+        # word 2 cc=8>=8 splits. Mutant (-1): lengths 2, cc=6<8 no split.
+        text = "aaa bbb ccc"
+        seg = {"start": 0.0, "end": 3.0, "text": text}
+        proc = SubtitlesProcessor([seg], "en", max_line_length=8, min_char_length_splitter=1)
+        sp = proc.determine_advanced_split_points(seg)
+        # Correct: split happens (cc=8>=8). Mutant: no split.
+        assert len(sp) >= 1
+
+    def test_char_count_after_decrement_string_words(self):
+        # mutmut_36: char_count_after -= word_length -> += word_length.
+        # Words "aaaa bb, ccc" lengths 5,4,4 total=13. word 1 (bb,):
+        # ccb=5>=5, cca=13-9=4<5 -> NO split. Mutant: cca huge -> split.
+        text = "aaaa bb, ccc"
+        seg = {"start": 0.0, "end": 3.0, "text": text}
+        proc = SubtitlesProcessor([seg], "en", max_line_length=100, min_char_length_splitter=5)
+        sp = proc.determine_advanced_split_points(seg)
+        # Correct: []. Mutant 36: [1].
+        assert sp == []
+        assert 1 not in sp
+
+    def test_max_split_recompute_add_space_string_words(self):
+        # mutmut_66: len(words[j])+add_space -> -add_space in recompute.
+        # "a b c d e f g" lengths 2, max=8. word 3 split, lsp=3, recompute
+        # cc=2. word 6 split mid=5. Mutant: cc=0, word 6 cc=6<8 no 2nd split.
+        text = "a b c d e f g"
+        seg = {"start": 0.0, "end": 7.0, "text": text}
+        proc = SubtitlesProcessor([seg], "en", max_line_length=8, min_char_length_splitter=1)
+        sp = proc.determine_advanced_split_points(seg)
+        # Correct: [2, 5]. Mutant 66: [2] (no second split).
+        assert 2 in sp
+        assert 5 in sp
+
+    def test_comma_split_last_split_point_minus_one(self):
+        # mutmut_80: last_split_point = i+1 -> i-1 after comma split.
+        # "aaaaaa bb, cccccc dddddd eee" lengths 7,4,7,7,4 total=29. max=15.
+        # word 1 comma split lsp=2. word 4 cc=18 max split mid=3. Mutant: mid=2.
+        text = "aaaaaa bb, cccccc dddddd eee"
+        seg = {"start": 0.0, "end": 5.0, "text": text}
+        proc = SubtitlesProcessor([seg], "en", max_line_length=15, min_char_length_splitter=4)
+        sp = proc.determine_advanced_split_points(seg)
+        # Correct: [1, 3]. Mutant 80: [1, 2].
+        assert 3 in sp
+        assert 2 not in sp
+
+    def test_comma_split_char_count_reset_to_zero(self):
+        # mutmut_83: char_count=0 -> char_count=1 after comma split.
+        # "aaa bb, cccccccccccccc" lengths 4,4,14 total=22. max=15, min=1.
+        # word 1 comma split cc=0. word 2 cc=14 no split. Mutant cc=1 -> split.
+        text = "aaa bb, cccccccccccccc"
+        seg = {"start": 0.0, "end": 3.0, "text": text}
+        proc = SubtitlesProcessor([seg], "en", max_line_length=15, min_char_length_splitter=1)
+        sp = proc.determine_advanced_split_points(seg)
+        # Correct: [1]. Mutant 83: [1, 2].
+        assert 1 in sp
+        assert 2 not in sp
+
+    def test_total_char_count_add_space_string_words(self):
+        # mutmut_25: len(word)+add_space -> len(word)-add_space in
+        # total_char_count sum. "xxx aaa, bbb" lengths 4,5,4 total=13.
+        # word 1 (aaa,): ccb=4>=4, cca=4>=4 -> split. Mutant total=7 -> no split.
+        text = "xxx aaa, bbb"
+        seg = {"start": 0.0, "end": 3.0, "text": text}
+        proc = SubtitlesProcessor([seg], "en", max_line_length=100, min_char_length_splitter=4)
+        sp = proc.determine_advanced_split_points(seg)
+        # Correct: [1]. Mutant 25: [] (cca too small).
+        assert 1 in sp
