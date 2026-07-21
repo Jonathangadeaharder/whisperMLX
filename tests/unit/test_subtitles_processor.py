@@ -186,6 +186,62 @@ class TestProcessSegments:
             assert s["end"] > s["start"]
 
 
+class TestProcessSegmentsNextStart:
+    """next_segment_start_time propagates from the NEXT segment's start."""
+
+    def test_last_fragment_end_extends_to_next_segment_start(self):
+        # Two segments. The first segment's last fragment end should extend to
+        # the next segment's start when within 0.8s. Kills the i+1->i-1/i+2,
+        # "start"->"XXstartXX"/"START", and ->None mutants.
+        seg1 = {
+            "start": 0.0,
+            "end": 1.0,
+            "text": "hello world",
+            "words": [
+                {"word": "hello", "start": 0.0, "end": 0.5, "score": 1.0},
+                {"word": "world", "start": 0.5, "end": 1.0, "score": 1.0},
+            ],
+        }
+        seg2 = {
+            "start": 1.5,
+            "end": 2.5,
+            "text": "foo bar",
+            "words": [
+                {"word": "foo", "start": 1.5, "end": 2.0, "score": 1.0},
+                {"word": "bar", "start": 2.0, "end": 2.5, "score": 1.0},
+            ],
+        }
+        proc = SubtitlesProcessor([seg1, seg2], "en", max_line_length=100)
+        subs = proc.process_segments(advanced_splitting=True)
+        # seg1 last fragment: end=1.0, next_start=1.5 -> gap=0.5 <= 0.8 -> extend.
+        # Find the seg1 subs (those ending at or near 1.5).
+        # The last sub of seg1 should have end == 1.5 (extended to next start).
+        seg1_subs = [s for s in subs if s["start"] < 1.5]  # pyrefly: ignore[unsupported-operation]
+        assert seg1_subs[-1]["end"] == 1.5
+
+    def test_last_segment_next_start_is_none(self):
+        # The last segment has no next -> next_segment_start_time=None -> no extend.
+        seg = {
+            "start": 0.0,
+            "end": 1.0,
+            "text": "hello world",
+            "words": [
+                {"word": "hello", "start": 0.0, "end": 0.5, "score": 1.0},
+                {"word": "world", "start": 0.5, "end": 1.0, "score": 1.0},
+            ],
+        }
+        proc = SubtitlesProcessor([seg], "en", max_line_length=100)
+        subs = proc.process_segments(advanced_splitting=True)
+        # No next segment -> end stays at the fragment's word end (1.0).
+        assert subs[-1]["end"] == 1.0
+
+    def test_advanced_splitting_default_true(self):
+        import inspect
+
+        sig = inspect.signature(SubtitlesProcessor.process_segments)
+        assert sig.parameters["advanced_splitting"].default is True
+
+
 class TestComplexScriptLanguage:
     def test_japanese_uses_shorter_lengths(self):
         proc = SubtitlesProcessor(
@@ -624,6 +680,145 @@ class TestDetermineSplitPointsExact:
         assert "end" in words[1]
 
 
+class TestDetermineAdvancedSplitPointsAddSpace:
+    """add_space = 0 for zh/ja, 1 otherwise. Affects char_count and split points."""
+
+    def test_zh_add_space_zero_changes_split_threshold(self):
+        # zh add_space=0: word_length=len(word). Mutant (add_space=1): +1.
+        # With max_line_length between the two counts, zh produces no split
+        # but mutant does.
+        words = [
+            {"word": "一二三四", "start": 0.0, "end": 0.5},
+            {"word": "五六七八", "start": 0.5, "end": 1.0},
+        ]
+        seg = {"start": 0.0, "end": 2.0, "text": "一二三四 五六七八", "words": words}
+        # max_line_length=10: zh char_count after w2 = 8 (< 10) -> NO split.
+        # mutant add_space=1: char_count after w2 = 10 (>= 10) -> split.
+        proc = SubtitlesProcessor([seg], "zh", max_line_length=10, min_char_length_splitter=3)
+        sp = proc.determine_advanced_split_points(seg)
+        assert sp == []  # zh: no split because add_space=0 keeps count at 8
+
+    def test_ja_add_space_zero(self):
+        words = [
+            {"word": "あいうえ", "start": 0.0, "end": 0.5},
+            {"word": "かきくけ", "start": 0.5, "end": 1.0},
+        ]
+        seg = {"start": 0.0, "end": 2.0, "text": "あいうえ かきくけ", "words": words}
+        proc = SubtitlesProcessor([seg], "ja", max_line_length=10, min_char_length_splitter=3)
+        sp = proc.determine_advanced_split_points(seg)
+        # ja add_space=0 -> char_count after w2 = 8 < 10 -> no split.
+        assert sp == []
+
+    def test_en_add_space_one_produces_split(self):
+        # Same word lengths but en (add_space=1) -> char_count after w2 = 10 >= 10.
+        words = [
+            {"word": "abcd", "start": 0.0, "end": 0.5},
+            {"word": "efgh", "start": 0.5, "end": 1.0},
+        ]
+        seg = {"start": 0.0, "end": 2.0, "text": "abcd efgh", "words": words}
+        proc = SubtitlesProcessor([seg], "en", max_line_length=10, min_char_length_splitter=3)
+        sp = proc.determine_advanced_split_points(seg)
+        # en add_space=1 -> 5+5=10 >= 10 -> split at midpoint=round((0+1)/2)=1.
+        assert len(sp) >= 1
+
+
+class TestDetermineAdvancedSplitPointsInitValues:
+    """last_split_point=0 and char_count=0 init values."""
+
+    def test_last_split_point_zero_first_split_at_midpoint(self):
+        # With last_split_point=0, first midpoint=normal_round((0+2)/2)=1.
+        # Mutant (last_split_point=1): midpoint=normal_round((1+2)/2)=2.
+        words = [{"word": f"word{i}", "start": float(i), "end": float(i) + 0.5} for i in range(6)]
+        seg = {
+            "start": 0.0,
+            "end": 6.0,
+            "text": " ".join(w["word"] for w in words),
+            "words": words,
+        }
+        proc = SubtitlesProcessor([seg], "en", max_line_length=10, min_char_length_splitter=3)
+        sp = proc.determine_advanced_split_points(seg)
+        # Correct: first split at 1. Mutant (last_split_point=1): first split at 2.
+        assert 1 in sp
+
+    def test_char_count_zero_first_word_accumulates(self):
+        # char_count starts 0. Mutant (char_count=1) shifts counts by +1.
+        # en: word 9 chars +1 space = 10. max=11: correct 10<11 no split;
+        # mutant 11>=11 splits.
+        words = [{"word": "a" * 9, "start": 0.0, "end": 0.5}]
+        seg = {"start": 0.0, "end": 1.0, "text": words[0]["word"], "words": words}
+        proc = SubtitlesProcessor([seg], "en", max_line_length=11, min_char_length_splitter=3)
+        sp = proc.determine_advanced_split_points(seg)
+        assert sp == []  # correct char_count=10 < 11 -> no split
+
+
+class TestGenerateSubtitlesPrefix:
+    """prefix = ' ' for non-zh/ja, '' for zh/ja. Kills the ['zh','ja'] mutants."""
+
+    def test_en_words_joined_with_space(self):
+        words = [
+            {"word": "hello", "start": 0.0, "end": 0.5, "score": 1.0},
+            {"word": "world", "start": 0.5, "end": 1.0, "score": 1.0},
+        ]
+        seg = {"start": 0.0, "end": 1.0, "text": "hello world", "words": words}
+        proc = SubtitlesProcessor([seg], "en", max_line_length=100)
+        subs = proc.generate_subtitles_from_split_points(seg, [])
+        # en prefix=' ' -> "hello world".
+        assert subs[0]["text"] == "hello world"
+
+    def test_zh_words_joined_without_space(self):
+        words = [
+            {"word": "你好", "start": 0.0, "end": 0.5, "score": 1.0},
+            {"word": "世界", "start": 0.5, "end": 1.0, "score": 1.0},
+        ]
+        seg = {"start": 0.0, "end": 1.0, "text": "你好世界", "words": words}
+        proc = SubtitlesProcessor([seg], "zh", max_line_length=100)
+        subs = proc.generate_subtitles_from_split_points(seg, [])
+        # zh prefix='' -> "你好世界" (no separator).
+        assert subs[0]["text"] == "你好世界"
+        assert " " not in subs[0]["text"]
+
+    def test_ja_words_joined_without_space(self):
+        words = [
+            {"word": "こん", "start": 0.0, "end": 0.5, "score": 1.0},
+            {"word": "にち", "start": 0.5, "end": 1.0, "score": 1.0},
+        ]
+        seg = {"start": 0.0, "end": 1.0, "text": "こんにち", "words": words}
+        proc = SubtitlesProcessor([seg], "ja", max_line_length=100)
+        subs = proc.generate_subtitles_from_split_points(seg, [])
+        # ja prefix='' -> "こんにち" (no separator). Kills the "ja"->"JA"/"XXjaXX" mutants.
+        assert subs[0]["text"] == "こんにち"
+        assert " " not in subs[0]["text"]
+
+
+class TestGenerateSubtitlesTotalTime:
+    """total_time = segment['end'] - segment['start']. Kills the - -> + mutant."""
+
+    def test_plain_words_duration_uses_total_time(self):
+        # Plain (non-dict) words: current_duration = (count/total) * total_time.
+        # With start=2.0, end=6.0 -> total_time=4.0 (correct) vs 8.0 (mutant +).
+        # 2 plain words, 1 split point -> each fragment duration = (1/2)*total_time.
+        seg = {"start": 2.0, "end": 6.0, "text": "alpha beta"}
+        proc = SubtitlesProcessor([seg], "en", max_line_length=100)
+        # 1 split point at index 0 -> two fragments of 1 word each.
+        subs = proc.generate_subtitles_from_split_points(seg, [0])
+        # Each fragment: duration = (1/2) * 4.0 = 2.0.
+        # First: start=2.0, end=4.0. Second: start=4.0, end=6.0.
+        assert len(subs) == 2
+        assert subs[0]["start"] == 2.0
+        assert subs[0]["end"] == 4.0
+        assert subs[1]["start"] == 4.0
+        assert subs[1]["end"] == 6.0
+
+    def test_plain_words_total_time_zero_when_start_equals_end(self):
+        # start == end -> total_time = 0 -> all durations 0.
+        seg = {"start": 3.0, "end": 3.0, "text": "alpha beta gamma"}
+        proc = SubtitlesProcessor([seg], "en", max_line_length=100)
+        subs = proc.generate_subtitles_from_split_points(seg, [1])
+        # Mutant (+): total_time = 6.0 -> durations non-zero. Correct: all 0.
+        for s in subs:
+            assert s["end"] == s["start"]
+
+
 class TestGenerateSubtitlesExact:
     """Exact subtitle output assertions for generate_subtitles_from_split_points."""
 
@@ -714,3 +909,159 @@ class TestGenerateSubtitlesExact:
         # next_start=3.0, gap=2.0 > 0.8 -> end stays 1.0.
         subs = proc.generate_subtitles_from_split_points(seg, [], next_start_time=3.0)
         assert subs[0]["end"] == 1.0
+
+
+class TestSplitPointsMutationKillers:
+    """Exact-value assertions killing specific surviving mutants."""
+
+    def _words(self, n, length=6, start=0.0):
+        """n dict-words each of `length` chars, 0.5s apart."""
+        return [
+            {"word": "a" * length, "start": start + i * 0.5, "end": start + i * 0.5 + 0.25}
+            for i in range(n)
+        ]
+
+    def test_last_split_point_initial_zero_affects_first_midpoint(self):
+        # 6 words "aaaaaa" (7 each). max=15: word 2 cc=21>=15.
+        # midpoint=normal_round((last_split_point+2)/2). Correct (0): 1.
+        # Mutant (last_split_point=1): round(1.5)=2.
+        words = self._words(6)
+        seg = {"start": 0.0, "end": 6.0, "text": " ".join(w["word"] for w in words), "words": words}
+        proc = SubtitlesProcessor([seg], "en", max_line_length=15, min_char_length_splitter=0)
+        sp = proc.determine_advanced_split_points(seg)
+        assert 1 in sp
+        assert 2 not in sp
+
+    def test_char_count_starts_at_zero(self):
+        # Mutant char_count=1 shifts first split earlier. 6 words of 7 chars.
+        # max_line_length=15: correct hits 15 at word 2 (7+7+7=21).
+        # Mutant (char_count=1): 1+7+7+7=22 at word 2, still triggers.
+        words = self._words(6)
+        seg = {"start": 0.0, "end": 6.0, "text": " ".join(w["word"] for w in words), "words": words}
+        proc = SubtitlesProcessor([seg], "en", max_line_length=15, min_char_length_splitter=15)
+        sp = proc.determine_advanced_split_points(seg)
+        # Correct: char_count_before=14 < 15 -> no split at word 2.
+        assert sp == [] or 1 not in sp
+
+    def test_char_count_accumulates_word_length(self):
+        # Mutant char_count=word_length (no accumulation). 6 words, max=15:
+        # correct: word 2 has char_count=21>=15, splits. Mutant: char_count=7
+        # always < 15, never splits.
+        words = self._words(6)
+        seg = {"start": 0.0, "end": 6.0, "text": " ".join(w["word"] for w in words), "words": words}
+        proc = SubtitlesProcessor([seg], "en", max_line_length=15, min_char_length_splitter=0)
+        sp = proc.determine_advanced_split_points(seg)
+        assert len(sp) >= 1
+
+    def test_char_count_subtract_mutant(self):
+        # Mutant char_count -= word_length. 6 words, max=15:
+        # correct: word 2 char_count=21 splits. Mutant: word 0 char_count=-7,
+        # word 1 -14, word 2 -21, never reaches 15, no split.
+        words = self._words(6)
+        seg = {"start": 0.0, "end": 6.0, "text": " ".join(w["word"] for w in words), "words": words}
+        proc = SubtitlesProcessor([seg], "en", max_line_length=15, min_char_length_splitter=0)
+        sp = proc.determine_advanced_split_points(seg)
+        assert len(sp) >= 1
+
+    def test_char_count_after_decrements(self):
+        # Mutant char_count_after = word_length or += word_length breaks comma split ...
+        # 3 words: "alphabeta" "gamma," "epsilonzeta" (len 9, 6, 11 + space=1).
+        # At i=1 (comma): ccb=10, correct cca=12. Mutant (=wl=7): cca=7.
+        words = [
+            {"word": "alphabeta", "start": 0.0, "end": 0.5},
+            {"word": "gamma,", "start": 0.5, "end": 1.0},
+            {"word": "epsilonzeta", "start": 1.0, "end": 1.5},
+        ]
+        seg = {"start": 0.0, "end": 2.0, "text": "alphabeta gamma, epsilonzeta", "words": words}
+        proc = SubtitlesProcessor([seg], "en", max_line_length=100, min_char_length_splitter=8)
+        sp = proc.determine_advanced_split_points(seg)
+        assert 1 in sp
+
+    def test_char_count_before_subtracts_word_length(self):
+        # Mutant char_count_before = None or char_count + word_length.
+        # None >= N raises TypeError -> crash kills mutant.
+        # +word_length: ccb too large, still splits (same result, survives).
+        words = self._words(6)
+        seg = {"start": 0.0, "end": 6.0, "text": " ".join(w["word"] for w in words), "words": words}
+        proc = SubtitlesProcessor([seg], "en", max_line_length=15, min_char_length_splitter=15)
+        sp = proc.determine_advanced_split_points(seg)
+        assert sp == [2]
+
+    def test_add_space_zh_exact(self):
+        # zh is a complex script -> max_line_length overridden to 30, min to 20.
+        # Use 6 chars (each len 1, add_space=0 -> 6 total < 30 no split).
+        # Mutant (add_space=1): 12 total < 30 no split too. Need more chars.
+        chars = "你好世界你好世界你好世界你好世界你好世界你好世界你好世界你好世界你好世界你好世界"
+        words = [{"word": c, "start": float(i), "end": float(i) + 0.5} for i, c in enumerate(chars)]
+        seg = {"start": 0.0, "end": float(len(chars)), "text": chars, "words": words}
+        proc = SubtitlesProcessor([seg], "zh")
+        sp = proc.determine_advanced_split_points(seg)
+        # Correct (add_space=0): first split when char_count>=30 at word 29 (30 chars).
+        # midpoint=round((0+29)/2)=14 or 15.
+        # Mutant (add_space=1): first split at word 14 (30 chars). midpoint=round((0+...
+        assert len(sp) >= 1
+        assert sp[0] >= 7
+
+    def test_add_space_ja_exact(self):
+        chars = "あいうえおかきくけこさしすせそたちつてとなにぬねのはひふへほ"
+        words = [{"word": c, "start": float(i), "end": float(i) + 0.5} for i, c in enumerate(chars)]
+        seg = {"start": 0.0, "end": float(len(chars)), "text": chars, "words": words}
+        proc = SubtitlesProcessor([seg], "ja")
+        sp = proc.determine_advanced_split_points(seg)
+        assert len(sp) >= 1
+        assert sp[0] >= 7
+
+    def test_add_space_not_in_zh_ja(self):
+        # Mutant add_space = 0 if lang NOT in [zh,ja] (flips en to 0).
+        # en words: correct len+1, mutant len+0.
+        # With 6-char words max=15: correct: word 2 = 21>=15 splits. mutant: 18>=15 s...
+        words = self._words(6)
+        seg = {"start": 0.0, "end": 6.0, "text": " ".join(w["word"] for w in words), "words": words}
+        proc = SubtitlesProcessor([seg], "en", max_line_length=19, min_char_length_splitter=0)
+        sp = proc.determine_advanced_split_points(seg)
+        assert len(sp) >= 1
+
+    def test_add_space_zh_string_value(self):
+        # Mutants change "zh" -> "XXzhXX", "ZH", etc. With mutant, zh is treated
+        # as non-complex (add_space=1) and max_line_length stays at constructor
+        # arg. Use long zh string with max_line_length=30, min=20.
+        chars = "你好世界你好世界你好世界你好世界你好世界你好世界你好世界你好世界你好世界你好世界"
+        words = [{"word": c, "start": float(i), "end": float(i) + 0.5} for i, c in enumerate(chars)]
+        seg = {"start": 0.0, "end": float(len(chars)), "text": chars, "words": words}
+        proc = SubtitlesProcessor([seg], "zh")
+        sp = proc.determine_advanced_split_points(seg)
+        assert len(sp) >= 1
+        assert sp[0] >= 7
+
+    def test_add_space_ja_string_value(self):
+        chars = "あいうえおかきくけこさしすせそたちつてとなにぬねのはひふへほ"
+        words = [{"word": c, "start": float(i), "end": float(i) + 0.5} for i, c in enumerate(chars)]
+        seg = {"start": 0.0, "end": float(len(chars)), "text": chars, "words": words}
+        proc = SubtitlesProcessor([seg], "ja")
+        sp = proc.determine_advanced_split_points(seg)
+        assert len(sp) >= 1
+        assert sp[0] >= 7
+
+    def test_word_length_uses_add_space_for_plain_words(self):
+        # Mutant word_length = len(word_text) - add_space.
+        # en plain words: correct len+1, mutant len-1.
+        # 6-char words max=15: correct: 7+7=14 <15, 7+7+7=21>=15 at word 2 splits.
+        words_text = ["aaaaaa" for _ in range(6)]
+        seg = {"start": 0.0, "end": 6.0, "text": " ".join(words_text)}
+        proc = SubtitlesProcessor([seg], "en", max_line_length=16, min_char_length_splitter=0)
+        sp = proc.determine_advanced_split_points(seg)
+        assert len(sp) >= 1
+
+    def test_total_char_count_dict_uses_word_key(self):
+        # Mutant changes len(word["word"]) to len(word) (dict has 3 keys -> 3).
+        # Dict words don't get add_space in total_char_count (source quirk).
+        # 3 dict words: "aaaa" "bb," "cccccc". correct total = 4+3+6 = 13.
+        words = [
+            {"word": "aaaa", "start": 0.0, "end": 0.5},
+            {"word": "bb,", "start": 0.5, "end": 1.0},
+            {"word": "cccccc", "start": 1.0, "end": 1.5},
+        ]
+        seg = {"start": 0.0, "end": 2.0, "text": "aaaa bb, cccccc", "words": words}
+        proc = SubtitlesProcessor([seg], "en", max_line_length=100, min_char_length_splitter=4)
+        sp = proc.determine_advanced_split_points(seg)
+        assert 1 in sp

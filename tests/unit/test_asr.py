@@ -656,16 +656,19 @@ class TestMlxWhisperPipelineTranscribeBranches:
         # base=100, combined -> 100/2 = 50.00%.
         assert "50.00%" in captured.out
 
-    def test_num_workers_positive_logs(self, monkeypatch, capsys):
+    @staticmethod
+    def _bind_log_to_stdout():
         import logging
         import sys
 
         root_logger = logging.getLogger("whisperx")
         root_logger.setLevel(logging.INFO)
-        # Rebind the StreamHandler to the current (pytest-captured) stdout.
         for h in root_logger.handlers:
             if isinstance(h, logging.StreamHandler):
                 h.stream = sys.stdout
+
+    def test_num_workers_positive_logs_value(self, monkeypatch, capsys):
+        self._bind_log_to_stdout()
         pipe = self._pipe()
         monkeypatch.setattr(
             asr_mod.mlx_whisper,
@@ -674,17 +677,23 @@ class TestMlxWhisperPipelineTranscribeBranches:
         )
         pipe.transcribe(np.zeros(16000, dtype=np.float32), num_workers=4)
         captured = capsys.readouterr()
-        assert "num_workers" in captured.out
+        # Assert the VALUE (4) is logged, killing the value->None mutant.
+        assert "num_workers=4" in captured.out
 
-    def test_batch_size_gt_one_logs_ignored(self, monkeypatch, capsys):
-        import logging
-        import sys
+    def test_num_workers_zero_no_log(self, monkeypatch, capsys):
+        self._bind_log_to_stdout()
+        pipe = self._pipe()
+        monkeypatch.setattr(
+            asr_mod.mlx_whisper,
+            "transcribe",
+            lambda a, **k: {"language": "en", "segments": []},
+        )
+        pipe.transcribe(np.zeros(16000, dtype=np.float32), num_workers=0)
+        captured = capsys.readouterr()
+        assert "num_workers" not in captured.out
 
-        root_logger = logging.getLogger("whisperx")
-        root_logger.setLevel(logging.INFO)
-        for h in root_logger.handlers:
-            if isinstance(h, logging.StreamHandler):
-                h.stream = sys.stdout
+    def test_batch_size_gt_one_logs_value(self, monkeypatch, capsys):
+        self._bind_log_to_stdout()
         pipe = self._pipe()
         monkeypatch.setattr(
             asr_mod.mlx_whisper,
@@ -693,7 +702,32 @@ class TestMlxWhisperPipelineTranscribeBranches:
         )
         pipe.transcribe(np.zeros(16000, dtype=np.float32), batch_size=8)
         captured = capsys.readouterr()
-        assert "batch_size" in captured.out
+        # Assert the VALUE (8) is logged, killing the value->None mutant.
+        assert "batch_size=8" in captured.out
+
+    def test_batch_size_zero_no_log(self, monkeypatch, capsys):
+        self._bind_log_to_stdout()
+        pipe = self._pipe()
+        monkeypatch.setattr(
+            asr_mod.mlx_whisper,
+            "transcribe",
+            lambda a, **k: {"language": "en", "segments": []},
+        )
+        pipe.transcribe(np.zeros(16000, dtype=np.float32), batch_size=0)
+        captured = capsys.readouterr()
+        assert "batch_size" not in captured.out
+
+    def test_batch_size_one_no_log(self, monkeypatch, capsys):
+        self._bind_log_to_stdout()
+        pipe = self._pipe()
+        monkeypatch.setattr(
+            asr_mod.mlx_whisper,
+            "transcribe",
+            lambda a, **k: {"language": "en", "segments": []},
+        )
+        pipe.transcribe(np.zeros(16000, dtype=np.float32), batch_size=1)
+        captured = capsys.readouterr()
+        assert "batch_size" not in captured.out
 
     def test_task_defaults_to_transcribe(self, monkeypatch):
         pipe = self._pipe()

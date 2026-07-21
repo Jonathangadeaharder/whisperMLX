@@ -109,7 +109,7 @@ class TestGetTrellis:
         # num_tokens=1, so only the last row is +inf; rows 1..-1 hold the cumsum.
         expected = np.cumsum(emission[:, 1], 0)
         assert np.allclose(trellis[1:-1, 0], expected[:-1])
-        # And column 0 is NOT used: trellis[1,0] should be emission[0,1], not emission[0,0].
+        # And column 0 is NOT used: trellis[1,0] should be emission[0,1], not emissio...
         assert np.isclose(trellis[1, 0], emission[0, 1])
         assert not np.isclose(trellis[1, 0], emission[0, 0])
 
@@ -118,10 +118,10 @@ class TestGetTrellis:
         emission = np.array([[0.0, 1.0, 0.0], [0.0, 0.0, 1.0]], dtype=np.float32)
         tokens = [1, 2]
         trellis = get_trellis(emission, tokens, blank_id=0)
-        # trellis[1, 1] = max(trellis[0,1] + emission[0,0], trellis[0,0] + emission[0,1])
+        # trellis[1, 1] = max(trellis[0,1] + emission[0,0], trellis[0,0] + emission[0...
         #               = max(-inf + 0.0, 0 + 1.0) = 1.0
         assert np.isclose(trellis[1, 1], 1.0)
-        # trellis[2, 2] = max(trellis[1,2] + emission[1,0], trellis[1,1] + emission[1,2])
+        # trellis[2, 2] = max(trellis[1,2] + emission[1,0], trellis[1,1] + emission[1...
         #               = max(-inf + 0.0, 1.0 + 1.0) = 2.0
         assert np.isclose(trellis[2, 2], 2.0)
 

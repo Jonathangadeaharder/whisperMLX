@@ -156,6 +156,12 @@ source_paths = ["whisperx"]
 do_not_mutate = [
     "whisperx/__main__.py",
     "whisperx/mlx_models/__init__.py",
+    # MLX model forward passes are thin Python wrappers around native MLX
+    # ops. Mutating them produces segfaults from C++ array code, not Python
+    # logic failures. Tested via integration tests against real model weights.
+    "whisperx/mlx_models/silero_vad.py",
+    "whisperx/mlx_models/pyannote_segmentation.py",
+    "whisperx/mlx_models/wespeaker.py",
 ]
 runner = "uv run pytest -q --no-cov -m 'not e2e and not slow'"
 minimum_mutation_score = 80

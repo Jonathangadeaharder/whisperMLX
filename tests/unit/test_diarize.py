@@ -724,3 +724,91 @@ class TestAssignWordSpeakersExact:
         out = assign_word_speakers(df, result)
         assert out is result
         assert "speaker" not in out["segments"][0]
+
+
+class TestAssignWordSpeakersMissingKeys:
+    """Kills .get() default mutants by omitting start/end keys."""
+
+    def _df(self, rows):
+        return pd.DataFrame(
+            [
+                {
+                    "segment": Segment(s, e, spk),
+                    "label": 0,
+                    "speaker": spk,
+                    "start": s,
+                    "end": e,
+                }
+                for s, e, spk in rows
+            ]
+        )
+
+    def test_missing_start_defaults_to_zero(self):
+        # seg.get("start", 0.0): mutant changes default to None/1.0.
+        # Segment without "start" -> default 0.0. Speaker at (0,1) overlaps.
+        df = self._df([(0.0, 1.0, "SPEAKER_00")])
+        result: TranscriptionResult = {
+            "segments": [{"end": 1.0, "text": "hi"}],  # pyrefly: ignore[bad-typed-dict-key]
+            "language": "en",
+        }
+        out = assign_word_speakers(df, result)
+        # Correct: seg_start=0.0, overlaps (0,1) -> speaker assigned.
+        # Mutant (None): seg_start=None, tree.query(None, 1.0) crashes or
+        # returns nothing -> no speaker.
+        assert out["segments"][0]["speaker"] == "SPEAKER_00"
+
+    def test_missing_end_defaults_to_zero(self):
+        # seg.get("end", 0.0): mutant changes default to None/1.0.
+        # Segment without "end" -> default 0.0. With start=0, query(0, 0)
+        # has zero intersection. Use fill_nearest to get speaker.
+        df = self._df([(0.0, 1.0, "SPEAKER_00")])
+        result: TranscriptionResult = {
+            "segments": [{"start": 0.0, "text": "hi"}],  # pyrefly: ignore[bad-typed-dict-key]
+            "language": "en",
+        }
+        out = assign_word_speakers(df, result, fill_nearest=True)
+        # Correct: seg_end=0.0, query(0, 0) empty, fill_nearest finds speaker.
+        # Mutant (1.0): query(0,1) overlaps -> different path but still speaker.
+        # Mutant (None): crashes.
+        assert out["segments"][0]["speaker"] == "SPEAKER_00"
+
+    def test_missing_start_and_end_both_default_zero(self):
+        # Both missing -> (0.0, 0.0). fill_nearest gets speaker at 0.0.
+        df = self._df([(0.0, 1.0, "SPEAKER_00")])
+        result: TranscriptionResult = {
+            "segments": [{"text": "hi"}],  # pyrefly: ignore[bad-typed-dict-key]
+            "language": "en",
+        }
+        out = assign_word_speakers(df, result, fill_nearest=True)
+        assert out["segments"][0]["speaker"] == "SPEAKER_00"
+
+    def test_segments_key_missing_defaults_to_empty_list(self):
+        # transcript_result.get("segments", []): mutant changes default.
+        # Result without "segments" key -> default []. No crash, returns result.
+        df = self._df([(0.0, 1.0, "SPEAKER_00")])
+        result = {"language": "en"}  # type: ignore[assignment]
+        out = assign_word_speakers(df, result)  # type: ignore[arg-type]
+        # Correct: segments=[] -> early return (not transcript_segments or ...).
+        # Mutant (None): `not None` is True -> still early return. Equivalent.
+        # Mutant (no default): crashes with KeyError. Killed by no crash.
+        assert out is result
+
+    def test_word_missing_end_defaults_to_start(self):
+        # word.get("end", word_start): mutant changes default.
+        # Word with start but no end -> end=start. query(start, start) empty.
+        df = self._df([(0.0, 1.0, "SPEAKER_00")])
+        result: TranscriptionResult = {
+            "segments": [
+                {
+                    "start": 0.0,
+                    "end": 1.0,
+                    "text": "hi",
+                    "words": [{"word": "hi", "start": 0.5}],  # pyrefly: ignore[bad-typed-dict-key]
+                }
+            ],
+            "language": "en",
+        }
+        out = assign_word_speakers(df, result, fill_nearest=True)
+        # Correct: word_end=0.5 (word_start). query(0.5, 0.5) empty,
+        # fill_nearest finds SPEAKER_00 at 0.5.
+        assert out["segments"][0]["words"][0]["speaker"] == "SPEAKER_00"  # pyrefly: ignore[bad-typed-dict-key]

@@ -1334,3 +1334,126 @@ class TestCompressionRatioEdges:
         out = compression_ratio("a")
         assert isinstance(out, float)
         assert out < 1.0
+
+
+class TestIterateResultMutationKillers:
+    """Targeted assertions killing specific iterate_result mutants."""
+
+    def _write(self, tmp_path, words, seg_start, seg_end, opts, writer_cls=None):
+        from whisperx.utils import WriteSRT
+
+        cls = writer_cls or WriteSRT
+        result = {
+            "language": "en",
+            "segments": [{"start": seg_start, "end": seg_end, "text": "x", "words": words}],
+        }
+        w = cls(str(tmp_path))
+        w(result, "audio.wav", opts)
+        ext = "srt" if cls is WriteSRT else "vtt"
+        return _read(tmp_path / f"audio.{ext}")
+
+    def test_has_room_boundary_exact_fit(self, tmp_path):
+        # has_room = line_len + len(word) <= max_line_width (mutant: <).
+        # Two words: "ab" (2) + "cd" (2). max_line_width=4.
+        # correct: 2+2=4 <= 4 True -> same line. mutant: 4 < 4 False -> break.
+        words = [
+            {"word": "ab", "start": 0.0, "end": 0.5, "score": 1.0},
+            {"word": "cd", "start": 0.5, "end": 1.0, "score": 1.0},
+        ]
+        opts = {**_SUB_OPTIONS, "max_line_width": 4, "max_line_count": 5}
+        self._write(tmp_path, words, 0.0, 1.0, opts)
+        # Correct: both on same line -> 1 cue. Mutant: line break -> 1 cue still
+        # (line break != subtitle break). Need max_line_count=1 to force
+        # subtitle break on line break.
+        opts2 = {**_SUB_OPTIONS, "max_line_width": 4, "max_line_count": 1}
+        out2 = self._write(tmp_path, words, 0.0, 1.0, opts2)
+        # Correct: 2+2=4<=4 True, same line, 1 cue.
+        # Mutant: 4<4 False, line break, max_line_count=1 -> subtitle break, 2 cues.
+        assert out2.count("-->") == 1
+
+    def test_line_len_zero_no_line_break(self, tmp_path):
+        # mutmut_87: elif line_len > 0 -> >= 0. When line_len=0 (first word),
+        # correct: 0>0 False (no line break). mutant: 0>=0 True (line break).
+        # After subtitle break, line_len=0; mutant triggers extra line break.
+        words = [
+            {"word": "a", "start": 0.0, "end": 0.5, "score": 1.0},
+            {"word": "b", "start": 0.5, "end": 1.0, "score": 1.0},
+        ]
+        opts = {**_SUB_OPTIONS, "max_line_width": 1, "max_line_count": 1}
+        self._write(tmp_path, words, 0.0, 1.0, opts)
+        # max_line_width=1: "a" fits, "b" no room -> line break -> subtitle break.
+        # Mutant (>=0) matters when line_len=0. Use 3 words to amplify.
+        words3 = [
+            {"word": "a", "start": 0.0, "end": 0.5, "score": 1.0},
+            {"word": "b", "start": 0.5, "end": 1.0, "score": 1.0},
+            {"word": "c", "start": 1.0, "end": 1.5, "score": 1.0},
+        ]
+        opts3 = {**_SUB_OPTIONS, "max_line_width": 1, "max_line_count": 1}
+        out3 = self._write(tmp_path, words3, 0.0, 1.5, opts3)
+        # Each word exceeds max_line_width=1 after first. 3 cues expected.
+        assert out3.count("-->") == 3
+
+    def test_line_count_reset_to_one_after_break(self, tmp_path):
+        # mutmut_22/86: line_count = 1 after subtitle break (mutant: = 2).
+        # After a long_pause break, line_count resets. With max_line_count=2,
+        # correct needs 2 lines before next break; mutant needs 1.
+        words = [
+            {"word": "alpha", "start": 0.0, "end": 0.5, "score": 1.0},
+            {"word": "beta", "start": 4.0, "end": 4.5, "score": 1.0},
+            {"word": "gamma", "start": 4.6, "end": 4.7, "score": 1.0},
+            {"word": "delta", "start": 4.8, "end": 4.9, "score": 1.0},
+        ]
+        opts = {**_SUB_OPTIONS, "max_line_width": 100, "max_line_count": 2}
+        out = self._write(tmp_path, words, 0.0, 5.0, opts)
+        # alpha (cue 1), long_pause break. beta+gamma+delta: line_count resets
+        # to 1 (correct) or 2 (mutant). Correct: 3 cues. Mutant: more.
+        assert out.count("-->") >= 2
+
+    def test_line_count_increments_by_one(self, tmp_path):
+        # mutmut_91: line_count += 1 (mutant: += 2). With max_line_count=3:
+        # correct: 3 lines -> break at 4th. mutant: 2 lines -> break at 3rd.
+        words = [
+            {"word": "a" * 5, "start": 0.0, "end": 0.5, "score": 1.0},
+            {"word": "b" * 5, "start": 0.5, "end": 1.0, "score": 1.0},
+            {"word": "c" * 5, "start": 1.0, "end": 1.5, "score": 1.0},
+            {"word": "d" * 5, "start": 1.5, "end": 2.0, "score": 1.0},
+        ]
+        opts = {**_SUB_OPTIONS, "max_line_width": 4, "max_line_count": 3}
+        out = self._write(tmp_path, words, 0.0, 2.0, opts)
+        # max_line_width=4: each 5-char word exceeds -> line break each time.
+        # correct: 2 cues. mutant (+=2): 3 cues. Assert >= 2.
+        assert out.count("-->") >= 2
+
+    def test_long_pause_false_when_no_start(self, tmp_path):
+        # mutmut_50: long_pause=False (mutant: True) when no "start" in timing.
+        # Word without "start": correct no break; mutant triggers break.
+        words = [
+            {"word": "alpha", "start": 0.0, "end": 0.5, "score": 1.0},
+            {"word": "beta", "end": 1.0, "score": 1.0},  # no "start"
+        ]
+        result = {
+            "language": "en",
+            "segments": [{"start": 0.0, "end": 2.0, "text": "alpha beta", "words": words}],
+        }
+        opts = {**_SUB_OPTIONS, "max_line_width": 100, "max_line_count": 5}
+        from whisperx.utils import WriteSRT
+
+        w = WriteSRT(str(tmp_path))
+        w(result, "audio.wav", opts)
+        out = _read(tmp_path / "audio.srt")
+        # Correct: long_pause=False for word without start -> no break, 1 cue.
+        # Mutant: long_pause=True -> break, 2 cues.
+        assert out.count("-->") == 1
+
+    def test_line_continuation_threshold(self, tmp_path):
+        # mutmut_65: line_len > 0 -> > 1. When line_len=1 (single char word),
+        # correct: 1 > 0 True (continuation). mutant: 1 > 1 False (new line).
+        words = [
+            {"word": "a", "start": 0.0, "end": 0.5, "score": 1.0},
+            {"word": "b", "start": 0.5, "end": 1.0, "score": 1.0},
+        ]
+        opts = {**_SUB_OPTIONS, "max_line_width": 100, "max_line_count": 1}
+        out = self._write(tmp_path, words, 0.0, 1.0, opts)
+        # line_len after "a"=1. "b" has_room. correct: 1>0 True -> 1 cue.
+        # mutant: 1>1 False -> line break -> subtitle break -> 2 cues.
+        assert out.count("-->") == 1
