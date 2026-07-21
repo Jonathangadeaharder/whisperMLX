@@ -394,10 +394,16 @@ class TestLoadModel:
         assert 1 in pipe.suppress_tokens
 
     def test_cuda_device_warns(self, monkeypatch, caplog):
+        # Re-enable propagation on the 'whisperx' parent so caplog (root
+        # handler) captures records emitted on 'whisperx.asr'.
+        import logging
+
+        root_lg = logging.getLogger("whisperx")
+        monkeypatch.setattr(root_lg, "propagate", True)
         with patch(
             "whisperx.mlx_models.pyannote_segmentation.segment_audio", lambda *a, **k: ([], [])
         ):
-            with caplog.at_level("WARNING", logger="whisperx.asr"):
+            with caplog.at_level("WARNING", logger="whisperx"):
                 pipe = load_model(
                     "small",
                     device="cuda",
@@ -405,12 +411,39 @@ class TestLoadModel:
                     vad_options={"chunk_size": 30, "vad_onset": 0.5, "vad_offset": 0.363},
                 )
         assert isinstance(pipe, MlxWhisperPipeline)
+        # Assert the cuda-specific warning text is present (kills == -> != mutant).
+        assert "device='cuda'" in caplog.text
+        assert "Apple Silicon" in caplog.text
 
-    def test_compute_type_not_default_info_logs(self, monkeypatch, caplog):
+    def test_cpu_device_does_not_warn_cuda(self, monkeypatch, caplog):
+        # device != "cuda" must NOT emit the cuda warning. Kills the
+        # `if device == "cuda"` -> `if device != "cuda"` mutant (which would
+        # warn on cpu).
+        import logging
+
+        root_lg = logging.getLogger("whisperx")
+        monkeypatch.setattr(root_lg, "propagate", True)
         with patch(
             "whisperx.mlx_models.pyannote_segmentation.segment_audio", lambda *a, **k: ([], [])
         ):
-            with caplog.at_level("INFO", logger="whisperx.asr"):
+            with caplog.at_level("WARNING", logger="whisperx"):
+                load_model(
+                    "small",
+                    device="cpu",
+                    vad_method="pyannote",
+                    vad_options={"chunk_size": 30, "vad_onset": 0.5, "vad_offset": 0.363},
+                )
+        assert "device='cuda'" not in caplog.text
+
+    def test_compute_type_not_default_info_logs(self, monkeypatch, caplog):
+        import logging
+
+        root_lg = logging.getLogger("whisperx")
+        monkeypatch.setattr(root_lg, "propagate", True)
+        with patch(
+            "whisperx.mlx_models.pyannote_segmentation.segment_audio", lambda *a, **k: ([], [])
+        ):
+            with caplog.at_level("INFO", logger="whisperx"):
                 pipe = load_model(
                     "small",
                     device="cpu",
@@ -419,6 +452,28 @@ class TestLoadModel:
                     vad_options={"chunk_size": 30, "vad_onset": 0.5, "vad_offset": 0.363},
                 )
         assert isinstance(pipe, MlxWhisperPipeline)
+        # Assert the compute_type info log carries the value (kills string mutants).
+        assert "float16" in caplog.text
+
+    def test_default_compute_type_no_info_log(self, monkeypatch, caplog):
+        # compute_type="default" must NOT emit the compute_type info log.
+        # Kills the `if compute_type != "default"` -> `==` mutant.
+        import logging
+
+        root_lg = logging.getLogger("whisperx")
+        monkeypatch.setattr(root_lg, "propagate", True)
+        with patch(
+            "whisperx.mlx_models.pyannote_segmentation.segment_audio", lambda *a, **k: ([], [])
+        ):
+            with caplog.at_level("INFO", logger="whisperx"):
+                load_model(
+                    "small",
+                    device="cpu",
+                    compute_type="default",
+                    vad_method="pyannote",
+                    vad_options={"chunk_size": 30, "vad_onset": 0.5, "vad_offset": 0.363},
+                )
+        assert "compute_type" not in caplog.text
 
 
 # Default-argument and branch-coverage tests: kill default-value mutants on
@@ -442,12 +497,16 @@ class TestLoadModelDefaults:
 
         assert isinstance(pipe.vad_model, Pyannote)
 
-    def test_default_compute_type_default_does_not_log(self, caplog):
+    def test_default_compute_type_default_does_not_log(self, monkeypatch, caplog):
         # compute_type defaults to "default" -> the info log is skipped.
+        import logging
+
+        root_lg = logging.getLogger("whisperx")
+        monkeypatch.setattr(root_lg, "propagate", True)
         with patch(
             "whisperx.mlx_models.pyannote_segmentation.segment_audio", lambda *a, **k: ([], [])
         ):
-            with caplog.at_level("INFO", logger="whisperx.asr"):
+            with caplog.at_level("INFO", logger="whisperx"):
                 pipe = load_model(
                     "small",
                     device="cpu",

@@ -67,8 +67,16 @@ class TestFormatTimestamp:
         assert format_timestamp(1.23456) == "00:01.235"
 
     def test_negative_raises(self):
-        with pytest.raises(AssertionError):
+        with pytest.raises(AssertionError, match="non-negative timestamp expected"):
             format_timestamp(-0.1)
+
+    def test_minutes_division_constant(self):
+        # 60s -> 00:01:00,000. Kills the minutes // 60_000 -> 60_001 mutant.
+        assert format_timestamp(60.0) == "01:00.000"
+
+    def test_hours_division_constant(self):
+        # 3600s -> 01:00:00,000. Kills the hours // 3_600_000 constant mutant.
+        assert format_timestamp(3600.0) == "01:00:00.000"
 
 
 class TestCompressionRatio:
@@ -97,7 +105,7 @@ class TestStr2Bool:
         assert str2bool("False") is False
 
     def test_invalid_raises(self):
-        with pytest.raises(ValueError):
+        with pytest.raises(ValueError, match="Expected one of"):
             str2bool("yes")
 
 
@@ -758,6 +766,177 @@ class TestIterateResultPaths:
         assert "こんにちは 世界" not in out
 
 
+class TestIterateResultEdgeCases:
+    """Edge-case assertions killing long_pause, line_count, and default mutants."""
+
+    def test_long_pause_exactly_3_seconds_no_break(self, tmp_path):
+        # long_pause = timing["start"] - last > 3.0 (strict >).
+        # A gap of exactly 3.0 should NOT trigger a pause break.
+        words = [
+            {"word": "first", "start": 0.0, "end": 0.5, "score": 1.0},
+            {"word": "second", "start": 3.0, "end": 3.5, "score": 1.0},
+        ]
+        result = {
+            "language": "en",
+            "segments": [{"start": 0.0, "end": 4.0, "text": "first second", "words": words}],
+        }
+        opts = {**_SUB_OPTIONS, "max_line_width": 100, "max_line_count": 5}
+        w = WriteSRT(str(tmp_path))
+        w(result, "audio.wav", opts)
+        out = _read(tmp_path / "audio.srt")
+        # Gap == 3.0, not > 3.0 -> no subtitle break.
+        assert out.count("-->") == 1
+
+    def test_long_pause_above_3_seconds_breaks(self, tmp_path):
+        # A gap > 3.0 triggers a subtitle break.
+        words = [
+            {"word": "first", "start": 0.0, "end": 0.5, "score": 1.0},
+            {"word": "second", "start": 4.0, "end": 4.5, "score": 1.0},
+        ]
+        result = {
+            "language": "en",
+            "segments": [{"start": 0.0, "end": 5.0, "text": "first second", "words": words}],
+        }
+        opts = {**_SUB_OPTIONS, "max_line_width": 100, "max_line_count": 5}
+        w = WriteSRT(str(tmp_path))
+        w(result, "audio.wav", opts)
+        out = _read(tmp_path / "audio.srt")
+        assert out.count("-->") >= 2
+
+    def test_max_line_width_none_defaults_to_1000(self, tmp_path):
+        # raw_max_line_width=None -> max_line_width=1000. A short text fits
+        # in one line (no split).
+        words = [
+            {"word": f"w{i}", "start": float(i) * 0.1, "end": float(i) * 0.1 + 0.05, "score": 1.0}
+            for i in range(10)
+        ]
+        result = {
+            "language": "en",
+            "segments": [
+                {
+                    "start": 0.0,
+                    "end": 1.0,
+                    "text": " ".join(w["word"] for w in words),
+                    "words": words,
+                }
+            ],
+        }
+        w = WriteSRT(str(tmp_path))
+        w(result, "audio.wav", _SUB_OPTIONS)
+        out = _read(tmp_path / "audio.srt")
+        # With max_line_width=1000, all 10 two-char words (20 chars) fit in one cue.
+        assert out.count("-->") == 1
+
+    def test_preserve_segments_when_both_none(self, tmp_path):
+        # Both max_line_width and max_line_count None -> preserve_segments=True.
+        # Segments are preserved as-is (seg_break at i==0).
+        words1 = [{"word": "hello", "start": 0.0, "end": 0.5, "score": 1.0}]
+        words2 = [{"word": "world", "start": 1.0, "end": 1.5, "score": 1.0}]
+        result = {
+            "language": "en",
+            "segments": [
+                {"start": 0.0, "end": 0.5, "text": "hello", "words": words1},
+                {"start": 1.0, "end": 1.5, "text": "world", "words": words2},
+            ],
+        }
+        w = WriteSRT(str(tmp_path))
+        w(result, "audio.wav", _SUB_OPTIONS)
+        out = _read(tmp_path / "audio.srt")
+        # Two segments -> two cues (seg_break preserves segment boundaries).
+        assert out.count("-->") == 2
+
+    def test_max_line_count_triggers_subtitle_break(self, tmp_path):
+        # max_line_count triggers a subtitle break when line_count reaches the
+        # limit. Need a small max_line_width so line breaks occur.
+        words = [
+            {"word": f"word{i:02d}", "start": i * 0.5, "end": i * 0.5 + 0.4, "score": 1.0}
+            for i in range(20)
+        ]
+        result = {
+            "language": "en",
+            "segments": [
+                {
+                    "start": 0.0,
+                    "end": 10.0,
+                    "text": " ".join(w["word"] for w in words),
+                    "words": words,
+                }
+            ],
+        }
+        opts = {**_SUB_OPTIONS, "max_line_width": 20, "max_line_count": 2}
+        w = WriteSRT(str(tmp_path))
+        w(result, "audio.wav", opts)
+        out = _read(tmp_path / "audio.srt")
+        # With max_line_width=20 and max_line_count=2, multiple subtitle breaks.
+        assert out.count("-->") >= 3
+
+    def test_word_without_start_no_long_pause(self, tmp_path):
+        # Words without "start" -> long_pause=False (no break from pause).
+        words = [{"word": "hello"}, {"word": "world"}]
+        result = {
+            "language": "en",
+            "segments": [{"start": 0.0, "end": 2.0, "text": "hello world", "words": words}],
+        }
+        opts = {**_SUB_OPTIONS, "max_line_width": 100, "max_line_count": 5}
+        w = WriteSRT(str(tmp_path))
+        w(result, "audio.wav", opts)
+        out = _read(tmp_path / "audio.srt")
+        assert "hello" in out and "world" in out
+
+    def test_highlight_words_yields_cue_with_correct_start(self, tmp_path):
+        # highlight_words: each word gets its own cue with start/end from the word.
+        words = [
+            {"word": "alpha", "start": 1.0, "end": 1.5, "score": 1.0},
+            {"word": "beta", "start": 2.0, "end": 2.5, "score": 1.0},
+        ]
+        result = {
+            "language": "en",
+            "segments": [{"start": 0.0, "end": 3.0, "text": "alpha beta", "words": words}],
+        }
+        opts = {**_SUB_OPTIONS, "highlight_words": True}
+        w = WriteSRT(str(tmp_path))
+        w(result, "audio.wav", opts)
+        out = _read(tmp_path / "audio.srt")
+        # The first word's cue starts at 00:01,000.
+        assert "00:00:01,000" in out
+
+    def test_speaker_prefix_in_word_mode(self, tmp_path):
+        # In word mode, speaker prefix is added to each cue.
+        words = [
+            {"word": "hello", "start": 0.0, "end": 0.5, "score": 1.0},
+            {"word": "world", "start": 0.5, "end": 1.0, "score": 1.0},
+        ]
+        result = {
+            "language": "en",
+            "segments": [
+                {
+                    "start": 0.0,
+                    "end": 1.0,
+                    "text": "hello world",
+                    "words": words,
+                    "speaker": "SPEAKER_00",
+                }
+            ],
+        }
+        w = WriteSRT(str(tmp_path))
+        w(result, "audio.wav", _SUB_OPTIONS)
+        out = _read(tmp_path / "audio.srt")
+        assert "[SPEAKER_00]:" in out
+
+    def test_plain_segment_speaker_prefix(self, tmp_path):
+        # Plain segments (no words) with speaker get [speaker]: prefix.
+        result = {
+            "language": "en",
+            "segments": [
+                {"start": 0.0, "end": 1.0, "text": "hello", "speaker": "SPEAKER_01"},
+            ],
+        }
+        w = WriteVTT(str(tmp_path))
+        w(result, "audio.wav", _SUB_OPTIONS)
+        out = _read(tmp_path / "audio.vtt")
+        assert "[SPEAKER_01]: hello" in out
+
+
 # Content-asserting writer tests: assert exact bytes to kill string/separator
 # and control-flow mutants in write_result / iterate_result.
 
@@ -993,6 +1172,93 @@ class TestSubtitlesWriterIterateResult:
         assert "hello" in out
         # No double-space from the un-stripped leading whitespace.
         assert "  " not in out.replace("\n", "")
+
+
+class TestSubtitlesWriterIterateResultEdges:
+    """Precise long_pause / line_count / max_line_width tests killing logic mutants."""
+
+    def _write(self, tmp_path, words, seg_start, seg_end, opts, writer_cls=None):
+        from whisperx.utils import WriteSRT
+
+        cls = writer_cls or WriteSRT
+        result = {
+            "language": "en",
+            "segments": [{"start": seg_start, "end": seg_end, "text": "x", "words": words}],
+        }
+        w = cls(str(tmp_path))
+        w(result, "audio.wav", opts)
+        ext = "srt" if cls is WriteSRT else "vtt"
+        return _read(tmp_path / f"audio.{ext}")
+
+    def test_long_pause_strict_gt_at_exactly_three_seconds(self, tmp_path):
+        # Gap of EXACTLY 3.0s: correct code (>3.0) -> no break (1 cue);
+        # mutant (>=3.0) -> break (2 cues). Kills the > -> >= mutant.
+        words = [
+            {"word": "alpha", "start": 0.0, "end": 0.5, "score": 1.0},
+            {"word": "beta", "start": 3.0, "end": 3.5, "score": 1.0},
+        ]
+        opts = {**_SUB_OPTIONS, "max_line_width": 100, "max_line_count": 5}
+        out = self._write(tmp_path, words, 0.0, 4.0, opts)
+        # No long_pause break -> single cue.
+        assert out.count("-->") == 1
+
+    def test_long_pause_and_vs_or_with_preserve_segments(self, tmp_path):
+        # preserve_segments=True (max_line_count=None). long_pause starts False.
+        # With a >3s gap inside ONE segment, correct (and) keeps words together
+        # (1 cue); mutant (or) splits (2 cues). Kills and -> or.
+        words = [
+            {"word": "alpha", "start": 0.0, "end": 0.5, "score": 1.0},
+            {"word": "beta", "start": 5.0, "end": 5.5, "score": 1.0},
+        ]
+        opts = {**_SUB_OPTIONS, "max_line_width": 100, "max_line_count": None}
+        out = self._write(tmp_path, words, 0.0, 6.0, opts)
+        # preserve_segments forces a seg_break only at i==0 of a NEW segment;
+        # here both words are in the same segment -> single cue.
+        assert out.count("-->") == 1
+
+    def test_long_pause_minus_vs_plus_operator(self, tmp_path):
+        # last=2.0, start=4.0: correct (start-last=2.0) -> no break (1 cue);
+        # mutant (start+last=6.0>3) -> break (2 cues). Kills - -> +.
+        words = [
+            {"word": "alpha", "start": 0.0, "end": 0.5, "score": 1.0},
+            {"word": "beta", "start": 2.0, "end": 2.5, "score": 1.0},
+            {"word": "gamma", "start": 4.0, "end": 4.5, "score": 1.0},
+        ]
+        opts = {**_SUB_OPTIONS, "max_line_width": 100, "max_line_count": 5}
+        out = self._write(tmp_path, words, 0.0, 5.0, opts)
+        # Gaps: 2.0 then 2.0 -> both <=3 -> no long_pause break -> 1 cue.
+        assert out.count("-->") == 1
+
+    def test_line_count_resets_to_one_after_break(self, tmp_path):
+        # max_line_count=2. After a forced break line_count resets to 1 (correct).
+        # Mutant resets to 2, breaking one line earlier. Use long_pause break
+        # (>3s gap) then short words; reset value affects line accumulation.
+        words = [
+            {"word": "alpha", "start": 0.0, "end": 0.5, "score": 1.0},
+            {"word": "beta", "start": 4.0, "end": 4.5, "score": 1.0},
+            {"word": "gamma", "start": 4.6, "end": 4.7, "score": 1.0},
+            {"word": "delta", "start": 4.8, "end": 4.9, "score": 1.0},
+        ]
+        opts = {**_SUB_OPTIONS, "max_line_width": 100, "max_line_count": 2}
+        out = self._write(tmp_path, words, 0.0, 5.0, opts)
+        # Break at beta (long_pause), then gamma+delta (line_count 1->2) breaks.
+        assert out.count("-->") >= 2
+
+    def test_default_max_line_width_1000_boundary(self, tmp_path):
+        # raw_max_line_width=None -> max_line_width=1000. 1-char + 1000-char
+        # words: correct (1+1000=1001<=1000 False) breaks; mutant (True) same.
+        # max_line_count=1 makes a line break force a subtitle break.
+        w1 = "a"
+        w2 = "b" * 1000
+        words = [
+            {"word": w1, "start": 0.0, "end": 0.5, "score": 1.0},
+            {"word": w2, "start": 0.6, "end": 0.7, "score": 1.0},
+        ]
+        opts = {**_SUB_OPTIONS, "max_line_width": None, "max_line_count": 1}
+        out = self._write(tmp_path, words, 0.0, 1.0, opts)
+        # Correct: line break between w1 and w2 -> max_line_count=1 -> subtitle
+        # break -> 2 cues.
+        assert out.count("-->") == 2
 
 
 class TestInterpolateNansEdges:

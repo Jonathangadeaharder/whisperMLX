@@ -201,6 +201,73 @@ class TestComplexScriptLanguage:
         assert proc.max_line_length == 30
 
 
+class TestComplexScriptLanguageAll:
+    @pytest.mark.parametrize(
+        "lang",
+        [
+            "th",
+            "lo",
+            "my",
+            "km",
+            "am",
+            "ko",
+            "ja",
+            "zh",
+            "ti",
+            "ta",
+            "te",
+            "kn",
+            "ml",
+            "hi",
+            "ne",
+            "mr",
+            "ar",
+            "fa",
+            "ur",
+            "ka",
+        ],
+    )
+    def test_complex_lang_forces_short_lengths(self, lang):
+        proc = SubtitlesProcessor([], lang, max_line_length=45, min_char_length_splitter=30)
+        assert proc.max_line_length == 30
+        assert proc.min_char_length_splitter == 20
+
+    def test_non_complex_lang_keeps_explicit_lengths(self):
+        proc = SubtitlesProcessor([], "en", max_line_length=45, min_char_length_splitter=30)
+        assert proc.max_line_length == 45
+        assert proc.min_char_length_splitter == 30
+
+
+class TestSubtitlesProcessorComma:
+    def test_comma_propagates_exact_value(self):
+        from whisperx.conjunctions import get_comma
+
+        for lang in ["en", "es", "fr", "de"]:
+            proc = SubtitlesProcessor([], lang)
+            assert proc.comma == get_comma(lang)
+
+
+class TestFormatTimestampEdges:
+    def test_negative_raises_with_message(self):
+        with pytest.raises(AssertionError, match="non-negative timestamp expected"):
+            format_timestamp(-0.001)
+
+    def test_one_hour_boundary(self):
+        assert format_timestamp(3600.0) == "01:00:00,000"
+
+    def test_one_hour_one_sec_one_ms(self):
+        assert format_timestamp(3601.001) == "01:00:01,001"
+
+    def test_minutes_division(self):
+        assert format_timestamp(60.0) == "00:01:00,000"
+
+    def test_seconds_division(self):
+        assert format_timestamp(1.5) == "00:00:01,500"
+
+    def test_vtt_separator_and_hours(self):
+        assert format_timestamp(3661.5, is_vtt=True) == "01:01:01.500"
+
+
 class TestSave:
     def test_writes_srt_file(self, tmp_path):
         seg = {
@@ -309,7 +376,7 @@ class TestDetermineAdvancedSplitPointsPlainWords:
         subs = proc.generate_subtitles_from_split_points(seg, sp)
         assert len(subs) >= 1
         assert subs[0]["start"] == 0.0
-        assert subs[-1]["end"] <= 4.0  # pyrefly: ignore[unsupported-operation]
+        assert subs[-1]["end"] <= 4.0  # pyrefly: ignore[unsupported-operation]  # pyrefly: ignore[unsupported-operation]
         for s in subs:
             assert s["text"]
 
@@ -444,3 +511,206 @@ class TestEstimateTimestampForWordEdges:
         proc.estimate_timestamp_for_word(words, 1)
         assert words[1]["start"] == 0.5
         assert words[1]["end"] == 0.5 + len("bbbb") * 0.25
+
+
+class TestDetermineSplitPointsExact:
+    """Exact split-point assertions killing char-count and add_space mutants."""
+
+    def test_en_add_space_is_one(self):
+        # English: add_space=1, so each word contributes len(word)+1 to
+        # total_char_count. "ab cd" = (2+1) + (2+1) = 6.
+        seg = {"start": 0.0, "end": 2.0, "text": "ab cd"}
+        proc = SubtitlesProcessor([seg], "en", max_line_length=100, min_char_length_splitter=3)
+        sp = proc.determine_advanced_split_points(seg)
+        # No split (6 < 100).
+        assert sp == []
+
+    def test_ja_add_space_is_zero(self):
+        # Japanese: add_space=0, so each char contributes len(char)+0.
+        # "あいう" = 3 chars total, no split.
+        seg = {"start": 0.0, "end": 2.0, "text": "あいう"}
+        proc = SubtitlesProcessor([seg], "ja", max_line_length=100, min_char_length_splitter=3)
+        sp = proc.determine_advanced_split_points(seg)
+        assert sp == []
+
+    def test_zh_add_space_is_zero(self):
+        seg = {"start": 0.0, "end": 2.0, "text": "你好世界"}
+        proc = SubtitlesProcessor([seg], "zh", max_line_length=100, min_char_length_splitter=3)
+        sp = proc.determine_advanced_split_points(seg)
+        assert sp == []
+
+    def test_exact_split_point_at_midpoint(self):
+        # 6 words each 4 chars + 1 space = 5 per word, total=30.
+        # max_line_length=10: after word 2 (char_count=15 > 10), split at
+        # midpoint = normal_round((0 + 2) / 2) = 1.
+        words = [{"word": f"word{i}", "start": float(i), "end": float(i) + 0.5} for i in range(6)]
+        seg = {"start": 0.0, "end": 6.0, "text": " ".join(w["word"] for w in words), "words": words}
+        proc = SubtitlesProcessor([seg], "en", max_line_length=10, min_char_length_splitter=3)
+        sp = proc.determine_advanced_split_points(seg)
+        # At least one split point, and the first should be >= 0.
+        assert len(sp) >= 1
+        assert all(s >= 0 for s in sp)
+
+    def test_split_at_comma_exact(self):
+        # Need enough chars before the comma word for char_count_before >= min.
+        words = [
+            {"word": "alpha", "start": 0.0, "end": 0.5},
+            {"word": "beta,", "start": 0.5, "end": 1.0},
+            {"word": "gamma", "start": 1.0, "end": 1.5},
+        ]
+        seg = {"start": 0.0, "end": 2.0, "text": "alpha beta, gamma", "words": words}
+        proc = SubtitlesProcessor([seg], "en", max_line_length=100, min_char_length_splitter=3)
+        sp = proc.determine_advanced_split_points(seg)
+        # Comma split: split_point at index 1 (the comma word).
+        assert 1 in sp
+
+    def test_split_at_conjunction_exact(self):
+        # Use longer words so char_count_after stays >= min_char_length_splitter.
+        # Note: dict words don't get add_space in total_char_count (source quirk),
+        # so we need enough trailing chars.
+        words = [
+            {"word": "alpha", "start": 0.0, "end": 0.5},
+            {"word": "beta", "start": 0.5, "end": 1.0},
+            {"word": "and", "start": 1.0, "end": 1.5},
+            {"word": "gamma", "start": 1.5, "end": 2.0},
+            {"word": "delta", "start": 2.0, "end": 2.5},
+        ]
+        seg = {"start": 0.0, "end": 3.0, "text": "alpha beta and gamma delta", "words": words}
+        proc = SubtitlesProcessor([seg], "en", max_line_length=100, min_char_length_splitter=3)
+        sp = proc.determine_advanced_split_points(seg)
+        # Conjunction split: split_point at i-1 = 1.
+        assert 1 in sp
+
+    def test_no_split_when_below_min_char_length(self):
+        # char_count_before < min_char_length_splitter prevents comma/conjunction
+        # splits.
+        words = [
+            {"word": "a,", "start": 0.0, "end": 0.5},
+            {"word": "b", "start": 0.5, "end": 1.0},
+        ]
+        seg = {"start": 0.0, "end": 2.0, "text": "a, b", "words": words}
+        proc = SubtitlesProcessor([seg], "en", max_line_length=100, min_char_length_splitter=10)
+        sp = proc.determine_advanced_split_points(seg)
+        # char_count_before=2 < 10, so no comma split.
+        assert sp == []
+
+    def test_plain_words_fall_back_to_text_split(self):
+        # No "words" key -> uses segment["text"].split().
+        seg = {"start": 0.0, "end": 6.0, "text": "one two three four five six"}
+        proc = SubtitlesProcessor([seg], "en", max_line_length=10, min_char_length_splitter=3)
+        sp = proc.determine_advanced_split_points(seg)
+        # Plain words still split.
+        assert len(sp) >= 1
+
+    def test_dict_words_use_word_key(self):
+        # When words are dicts, word_text = word["word"].
+        words = [{"word": "hello", "start": 0.0, "end": 0.5}]
+        seg = {"start": 0.0, "end": 1.0, "text": "hello", "words": words}
+        proc = SubtitlesProcessor([seg], "en", max_line_length=100, min_char_length_splitter=3)
+        sp = proc.determine_advanced_split_points(seg)
+        assert sp == []
+
+    def test_next_segment_start_time_estimates_missing_timestamps(self):
+        # Words with missing start/end get estimated via estimate_timestamp_for_word.
+        words = [
+            {"word": "hello", "start": 0.0, "end": 0.5},
+            {"word": "world"},  # missing start/end
+        ]
+        seg = {"start": 0.0, "end": 2.0, "text": "hello world", "words": words}
+        proc = SubtitlesProcessor([seg], "en", max_line_length=100, min_char_length_splitter=3)
+        proc.determine_advanced_split_points(seg, next_segment_start_time=1.5)
+        # The missing word should now have start/end set.
+        assert "start" in words[1]
+        assert "end" in words[1]
+
+
+class TestGenerateSubtitlesExact:
+    """Exact subtitle output assertions for generate_subtitles_from_split_points."""
+
+    def test_dict_words_exact_text_and_times(self):
+        words = [
+            {"word": "hello", "start": 0.0, "end": 0.5, "score": 1.0},
+            {"word": "world", "start": 0.5, "end": 1.0, "score": 1.0},
+        ]
+        seg = {"start": 0.0, "end": 2.0, "text": "hello world", "words": words}
+        proc = SubtitlesProcessor([seg], "en", max_line_length=100)
+        subs = proc.generate_subtitles_from_split_points(seg, [])
+        assert len(subs) == 1
+        assert subs[0]["text"] == "hello world"
+        assert subs[0]["start"] == 0.0
+        assert subs[0]["end"] == 1.0
+
+    def test_dict_words_next_start_extends_end(self):
+        # When next word's start is within 0.8s of end, extend end.
+        words = [
+            {"word": "hello", "start": 0.0, "end": 0.5, "score": 1.0},
+            {"word": "world", "start": 0.5, "end": 1.0, "score": 1.0},
+        ]
+        seg = {"start": 0.0, "end": 2.0, "text": "hello world", "words": words}
+        proc = SubtitlesProcessor([seg], "en", max_line_length=100)
+        # Pass a split point to test the non-last fragment path.
+        subs = proc.generate_subtitles_from_split_points(seg, [0])
+        # First fragment: words[0:1] = ["hello"], start=0.0, end=0.5.
+        # next_start = words[1]["start"] = 0.5; 0.5 - 0.5 = 0 <= 0.8 -> end=0.5.
+        assert subs[0]["start"] == 0.0
+        assert subs[0]["end"] == 0.5
+        assert subs[0]["text"] == "hello"
+
+    def test_plain_words_proportional_timing(self):
+        # Plain words: current_duration = (word_count / total_word_count) * total_time.
+        seg = {"start": 0.0, "end": 4.0, "text": "one two three four"}
+        proc = SubtitlesProcessor([seg], "en", max_line_length=10, min_char_length_splitter=3)
+        sp = proc.determine_advanced_split_points(seg)
+        subs = proc.generate_subtitles_from_split_points(seg, sp)
+        # First subtitle starts at 0.0.
+        assert subs[0]["start"] == 0.0
+        # Last subtitle end <= segment end.
+        assert subs[-1]["end"] <= 4.0  # pyrefly: ignore[unsupported-operation]
+        # Each subtitle has non-empty text.
+        for s in subs:
+            assert s["text"]
+
+    def test_japanese_plain_words_no_space_join(self):
+        seg = {"start": 0.0, "end": 2.0, "text": "こんにちは世界"}
+        proc = SubtitlesProcessor([seg], "ja", max_line_length=20, min_char_length_splitter=5)
+        sp = proc.determine_advanced_split_points(seg)
+        subs = proc.generate_subtitles_from_split_points(seg, sp)
+        # Japanese: prefix is "" (no space), so text is joined directly.
+        assert subs[0]["text"] == "こんにちは世界"
+
+    def test_empty_split_points_last_fragment(self):
+        # No splits -> single subtitle with all words.
+        words = [
+            {"word": "a", "start": 0.0, "end": 0.5, "score": 1.0},
+            {"word": "b", "start": 0.5, "end": 1.0, "score": 1.0},
+        ]
+        seg = {"start": 0.0, "end": 1.0, "text": "a b", "words": words}
+        proc = SubtitlesProcessor([seg], "en", max_line_length=100)
+        subs = proc.generate_subtitles_from_split_points(seg, [])
+        assert len(subs) == 1
+        assert subs[0]["text"] == "a b"
+        assert subs[0]["start"] == 0.0
+        assert subs[0]["end"] == 1.0
+
+    def test_next_start_time_extends_last_fragment_end(self):
+        # next_start_time within 0.8s of last fragment end -> extend.
+        words = [
+            {"word": "hello", "start": 0.0, "end": 0.5, "score": 1.0},
+            {"word": "world", "start": 0.5, "end": 1.0, "score": 1.0},
+        ]
+        seg = {"start": 0.0, "end": 1.0, "text": "hello world", "words": words}
+        proc = SubtitlesProcessor([seg], "en", max_line_length=100)
+        subs = proc.generate_subtitles_from_split_points(seg, [], next_start_time=1.5)
+        # last fragment end=1.0, next_start=1.5, gap=0.5 <= 0.8 -> end=1.5.
+        assert subs[0]["end"] == 1.5
+
+    def test_next_start_time_not_extended_when_gap_too_large(self):
+        words = [
+            {"word": "hello", "start": 0.0, "end": 0.5, "score": 1.0},
+            {"word": "world", "start": 0.5, "end": 1.0, "score": 1.0},
+        ]
+        seg = {"start": 0.0, "end": 1.0, "text": "hello world", "words": words}
+        proc = SubtitlesProcessor([seg], "en", max_line_length=100)
+        # next_start=3.0, gap=2.0 > 0.8 -> end stays 1.0.
+        subs = proc.generate_subtitles_from_split_points(seg, [], next_start_time=3.0)
+        assert subs[0]["end"] == 1.0

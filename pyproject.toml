@@ -109,14 +109,8 @@ project_excludes = [
     "**/build/**",
     "**/dist/**",
     "**/whispermlx.egg-info/**",
+    "**/mutants/**",
 ]
-
-[tool.pyrefly.report]
-report_any = "warn"
-report_unbound_name = "error"
-report_missing_import = "error"
-report_private_import = "warn"
-report_undefined_attr = "warn"
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

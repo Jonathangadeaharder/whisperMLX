@@ -542,3 +542,391 @@ class TestTranscribeTaskPropagatesOptions:
         # writer called with a result dict whose language == "fr".
         result_arg = writer.call_args.args[0]
         assert result_arg["language"] == "fr"
+
+
+class TestTranscribeTaskArgsPop:
+    """Assert args.pop values are passed to the right downstream calls."""
+
+    def test_model_name_passed_to_load_model(self, mock_asr_pipeline, tmp_path):
+        args = _base_args(output_dir=str(tmp_path), no_align=True, model="large-v3")
+        with (
+            patch("whisperx.transcribe.load_model", return_value=mock_asr_pipeline) as lm,
+            patch("whisperx.transcribe.load_audio", return_value=np.zeros(16000, dtype=np.float32)),
+            patch("whisperx.transcribe.os.makedirs"),
+            patch("whisperx.transcribe.get_writer"),
+        ):
+            tr.transcribe_task(args, _make_parser())
+        assert lm.call_args.args[0] == "large-v3"
+
+    def test_device_passed_to_load_model(self, mock_asr_pipeline, tmp_path):
+        args = _base_args(output_dir=str(tmp_path), no_align=True, device="metal")
+        with (
+            patch("whisperx.transcribe.load_model", return_value=mock_asr_pipeline) as lm,
+            patch("whisperx.transcribe.load_audio", return_value=np.zeros(16000, dtype=np.float32)),
+            patch("whisperx.transcribe.os.makedirs"),
+            patch("whisperx.transcribe.get_writer"),
+        ):
+            tr.transcribe_task(args, _make_parser())
+        assert lm.call_args.kwargs.get("device") == "metal"
+
+    def test_device_index_passed_to_load_model(self, mock_asr_pipeline, tmp_path):
+        args = _base_args(output_dir=str(tmp_path), no_align=True, device_index=1)
+        with (
+            patch("whisperx.transcribe.load_model", return_value=mock_asr_pipeline) as lm,
+            patch("whisperx.transcribe.load_audio", return_value=np.zeros(16000, dtype=np.float32)),
+            patch("whisperx.transcribe.os.makedirs"),
+            patch("whisperx.transcribe.get_writer"),
+        ):
+            tr.transcribe_task(args, _make_parser())
+        assert lm.call_args.kwargs.get("device_index") == 1
+
+    def test_compute_type_passed_to_load_model(self, mock_asr_pipeline, tmp_path):
+        args = _base_args(output_dir=str(tmp_path), no_align=True, compute_type="float16")
+        with (
+            patch("whisperx.transcribe.load_model", return_value=mock_asr_pipeline) as lm,
+            patch("whisperx.transcribe.load_audio", return_value=np.zeros(16000, dtype=np.float32)),
+            patch("whisperx.transcribe.os.makedirs"),
+            patch("whisperx.transcribe.get_writer"),
+        ):
+            tr.transcribe_task(args, _make_parser())
+        assert lm.call_args.kwargs.get("compute_type") == "float16"
+
+    def test_batch_size_passed_to_transcribe(self, mock_asr_pipeline, tmp_path):
+        args = _base_args(output_dir=str(tmp_path), no_align=True, batch_size=16)
+        with (
+            patch("whisperx.transcribe.load_model", return_value=mock_asr_pipeline),
+            patch("whisperx.transcribe.load_audio", return_value=np.zeros(16000, dtype=np.float32)),
+            patch("whisperx.transcribe.os.makedirs"),
+            patch("whisperx.transcribe.get_writer"),
+        ):
+            tr.transcribe_task(args, _make_parser())
+        assert mock_asr_pipeline.transcribe.call_args.kwargs.get("batch_size") == 16
+
+    def test_task_passed_to_load_model(self, mock_asr_pipeline, tmp_path):
+        args = _base_args(output_dir=str(tmp_path), no_align=True, task="transcribe")
+        with (
+            patch("whisperx.transcribe.load_model", return_value=mock_asr_pipeline) as lm,
+            patch("whisperx.transcribe.load_audio", return_value=np.zeros(16000, dtype=np.float32)),
+            patch("whisperx.transcribe.os.makedirs"),
+            patch("whisperx.transcribe.get_writer"),
+        ):
+            tr.transcribe_task(args, _make_parser())
+        # task is passed to load_model, not model.transcribe.
+        assert lm.call_args.kwargs.get("task") == "transcribe"
+
+    def test_output_format_passed_to_get_writer(self, mock_asr_pipeline, tmp_path):
+        args = _base_args(output_dir=str(tmp_path), no_align=True, output_format="srt")
+        with (
+            patch("whisperx.transcribe.load_model", return_value=mock_asr_pipeline),
+            patch("whisperx.transcribe.load_audio", return_value=np.zeros(16000, dtype=np.float32)),
+            patch("whisperx.transcribe.os.makedirs"),
+            patch("whisperx.transcribe.get_writer") as gw,
+        ):
+            tr.transcribe_task(args, _make_parser())
+        # get_writer("srt", output_dir) called.
+        assert gw.call_args.args[0] == "srt"
+
+    def test_vad_method_passed_to_load_model(self, mock_asr_pipeline, tmp_path):
+        args = _base_args(output_dir=str(tmp_path), no_align=True, vad_method="silero")
+        with (
+            patch("whisperx.transcribe.load_model", return_value=mock_asr_pipeline) as lm,
+            patch("whisperx.transcribe.load_audio", return_value=np.zeros(16000, dtype=np.float32)),
+            patch("whisperx.transcribe.os.makedirs"),
+            patch("whisperx.transcribe.get_writer"),
+        ):
+            tr.transcribe_task(args, _make_parser())
+        assert lm.call_args.kwargs.get("vad_method") == "silero"
+
+    def test_model_cache_only_passed_to_load_model(self, mock_asr_pipeline, tmp_path):
+        args = _base_args(output_dir=str(tmp_path), no_align=True, model_cache_only=True)
+        with (
+            patch("whisperx.transcribe.load_model", return_value=mock_asr_pipeline) as lm,
+            patch("whisperx.transcribe.load_audio", return_value=np.zeros(16000, dtype=np.float32)),
+            patch("whisperx.transcribe.os.makedirs"),
+            patch("whisperx.transcribe.get_writer"),
+        ):
+            tr.transcribe_task(args, _make_parser())
+        # model_cache_only is passed as local_files_only to load_model.
+        assert lm.call_args.kwargs.get("local_files_only") is True
+
+    def test_interpolate_method_passed_to_align(self, mock_asr_pipeline, tmp_path):
+        args = _base_args(
+            output_dir=str(tmp_path),
+            no_align=False,
+            interpolate_method="linear",
+            task="transcribe",
+        )
+        with (
+            patch("whisperx.transcribe.load_model", return_value=mock_asr_pipeline),
+            patch("whisperx.transcribe.load_audio", return_value=np.zeros(16000, dtype=np.float32)),
+            patch("whisperx.transcribe.os.makedirs"),
+            patch("whisperx.transcribe.get_writer"),
+            patch(
+                "whisperx.transcribe.load_align_model",
+                return_value=(MagicMock(), {"language": "en"}),
+            ),
+            patch("whisperx.transcribe.align") as al,
+        ):
+            al.return_value = {"segments": [], "word_segments": []}
+            tr.transcribe_task(args, _make_parser())
+        assert al.call_args.kwargs.get("interpolate_method") == "linear"
+
+    def test_return_char_alignments_passed_to_align(self, mock_asr_pipeline, tmp_path):
+        args = _base_args(
+            output_dir=str(tmp_path),
+            no_align=False,
+            return_char_alignments=True,
+            task="transcribe",
+        )
+        with (
+            patch("whisperx.transcribe.load_model", return_value=mock_asr_pipeline),
+            patch("whisperx.transcribe.load_audio", return_value=np.zeros(16000, dtype=np.float32)),
+            patch("whisperx.transcribe.os.makedirs"),
+            patch("whisperx.transcribe.get_writer"),
+            patch(
+                "whisperx.transcribe.load_align_model",
+                return_value=(MagicMock(), {"language": "en"}),
+            ),
+            patch("whisperx.transcribe.align") as al,
+        ):
+            al.return_value = {"segments": [], "word_segments": []}
+            tr.transcribe_task(args, _make_parser())
+        assert al.call_args.kwargs.get("return_char_alignments") is True
+
+
+# Assert exact propagation of every args.pop() value into its mocked
+# downstream call. Each test kills the corresponding args.pop("X") -> None
+# mutant by checking the value survives intact through transcribe_task.
+
+
+class TestTranscribeTaskValuePropagation:
+    def test_load_model_receives_device_device_index_model_dir_compute_type(
+        self, mock_asr_pipeline, tmp_path
+    ):
+        args = _base_args(
+            output_dir=str(tmp_path),
+            no_align=True,
+            device="cpu",
+            device_index=3,
+            model_dir="/some/cache",
+            compute_type="float16",
+        )
+        with (
+            patch("whisperx.transcribe.load_model", return_value=mock_asr_pipeline) as lm,
+            patch("whisperx.transcribe.load_audio", return_value=np.zeros(16000, dtype=np.float32)),
+            patch("whisperx.transcribe.os.makedirs"),
+            patch("whisperx.transcribe.get_writer"),
+        ):
+            tr.transcribe_task(args, _make_parser())
+        kw = lm.call_args.kwargs
+        assert kw["device"] == "cpu"
+        assert kw["device_index"] == 3
+        assert kw["download_root"] == "/some/cache"
+        assert kw["compute_type"] == "float16"
+
+    def test_load_model_receives_vad_method_onset_offset_task_hf_token(
+        self, mock_asr_pipeline, tmp_path
+    ):
+        args = _base_args(
+            output_dir=str(tmp_path),
+            no_align=True,
+            vad_method="silero",
+            vad_onset=0.42,
+            vad_offset=0.31,
+            task="translate",
+            hf_token="tok-abc",
+        )
+        with (
+            patch("whisperx.transcribe.load_model", return_value=mock_asr_pipeline) as lm,
+            patch("whisperx.transcribe.load_audio", return_value=np.zeros(16000, dtype=np.float32)),
+            patch("whisperx.transcribe.os.makedirs"),
+            patch("whisperx.transcribe.get_writer"),
+        ):
+            tr.transcribe_task(args, _make_parser())
+        kw = lm.call_args.kwargs
+        assert kw["vad_method"] == "silero"
+        assert kw["vad_options"]["vad_onset"] == 0.42
+        assert kw["vad_options"]["vad_offset"] == 0.31
+        assert kw["task"] == "translate"
+        assert kw["use_auth_token"] == "tok-abc"
+
+    def test_load_model_local_files_only_from_model_cache_only(self, mock_asr_pipeline, tmp_path):
+        args = _base_args(output_dir=str(tmp_path), no_align=True, model_cache_only=True)
+        with (
+            patch("whisperx.transcribe.load_model", return_value=mock_asr_pipeline) as lm,
+            patch("whisperx.transcribe.load_audio", return_value=np.zeros(16000, dtype=np.float32)),
+            patch("whisperx.transcribe.os.makedirs"),
+            patch("whisperx.transcribe.get_writer"),
+        ):
+            tr.transcribe_task(args, _make_parser())
+        assert lm.call_args.kwargs["local_files_only"] is True
+
+    def test_batch_size_passed_to_transcribe(self, mock_asr_pipeline, tmp_path):
+        args = _base_args(output_dir=str(tmp_path), no_align=True, batch_size=16)
+        with (
+            patch("whisperx.transcribe.load_model", return_value=mock_asr_pipeline),
+            patch("whisperx.transcribe.load_audio", return_value=np.zeros(16000, dtype=np.float32)),
+            patch("whisperx.transcribe.os.makedirs"),
+            patch("whisperx.transcribe.get_writer"),
+        ):
+            tr.transcribe_task(args, _make_parser())
+        assert mock_asr_pipeline.transcribe.call_args.kwargs.get("batch_size") == 16
+
+    def test_output_format_and_dir_passed_to_get_writer(self, mock_asr_pipeline, tmp_path):
+        args = _base_args(output_dir=str(tmp_path), no_align=True, output_format="vtt")
+        with (
+            patch("whisperx.transcribe.load_model", return_value=mock_asr_pipeline),
+            patch("whisperx.transcribe.load_audio", return_value=np.zeros(16000, dtype=np.float32)),
+            patch("whisperx.transcribe.os.makedirs"),
+            patch("whisperx.transcribe.get_writer") as gw,
+        ):
+            tr.transcribe_task(args, _make_parser())
+        assert gw.call_args.args[0] == "vtt"
+        assert gw.call_args.args[1] == str(tmp_path)
+
+    def test_align_model_and_cache_passed_to_load_align_model(self, mock_asr_pipeline, tmp_path):
+        args = _base_args(
+            output_dir=str(tmp_path),
+            no_align=False,
+            align_model="custom/repo",
+            model_dir="/cdir",
+            model_cache_only=True,
+        )
+        with (
+            patch("whisperx.transcribe.load_model", return_value=mock_asr_pipeline),
+            patch("whisperx.transcribe.load_audio", return_value=np.zeros(16000, dtype=np.float32)),
+            patch("whisperx.transcribe.os.makedirs"),
+            patch("whisperx.transcribe.get_writer"),
+            patch("whisperx.transcribe.load_align_model") as la,
+            patch("whisperx.transcribe.align") as al,
+        ):
+            la.return_value = (MagicMock(), {"language": "en", "dictionary": {}, "type": "hf"})
+            al.return_value = {"segments": [], "word_segments": []}
+            tr.transcribe_task(args, _make_parser())
+        kw = la.call_args
+        # Positional align_language="en", then model_name, model_dir, model_cache_only.
+        assert kw.args[0] == "en"
+        assert kw.kwargs["model_name"] == "custom/repo"
+        assert kw.kwargs["model_dir"] == "/cdir"
+        assert kw.kwargs["model_cache_only"] is True
+
+    def test_diarize_model_name_token_device_cache_passed(self, mock_asr_pipeline, tmp_path):
+        args = _base_args(
+            output_dir=str(tmp_path),
+            no_align=True,
+            diarize=True,
+            diarize_model="org/diarize-x",
+            hf_token="tok-xyz",
+            model_dir="/dcache",
+            device="cpu",
+        )
+        with (
+            patch("whisperx.transcribe.load_model", return_value=mock_asr_pipeline),
+            patch("whisperx.transcribe.load_audio", return_value=np.zeros(16000, dtype=np.float32)),
+            patch("whisperx.transcribe.os.makedirs"),
+            patch("whisperx.transcribe.get_writer"),
+            patch("whisperx.transcribe.DiarizationPipeline") as DP,
+            patch("whisperx.transcribe.assign_word_speakers"),
+        ):
+            pipe = MagicMock()
+            pipe.return_value = pd.DataFrame(
+                [{"segment": None, "label": 0, "speaker": "SPEAKER_00", "start": 0.0, "end": 1.0}]
+            )
+            DP.return_value = pipe
+            tr.transcribe_task(args, _make_parser())
+        kw = DP.call_args.kwargs
+        assert kw["model_name"] == "org/diarize-x"
+        assert kw["token"] == "tok-xyz"
+        assert kw["device"] == "cpu"
+        assert kw["cache_dir"] == "/dcache"
+
+    def test_min_max_speakers_passed_to_diarize_call(self, mock_asr_pipeline, tmp_path):
+        args = _base_args(
+            output_dir=str(tmp_path),
+            no_align=True,
+            diarize=True,
+            min_speakers=2,
+            max_speakers=5,
+        )
+        with (
+            patch("whisperx.transcribe.load_model", return_value=mock_asr_pipeline),
+            patch("whisperx.transcribe.load_audio", return_value=np.zeros(16000, dtype=np.float32)),
+            patch("whisperx.transcribe.os.makedirs"),
+            patch("whisperx.transcribe.get_writer"),
+            patch("whisperx.transcribe.DiarizationPipeline") as DP,
+            patch("whisperx.transcribe.assign_word_speakers"),
+        ):
+            pipe = MagicMock()
+            pipe.return_value = pd.DataFrame(
+                [{"segment": None, "label": 0, "speaker": "SPEAKER_00", "start": 0.0, "end": 1.0}]
+            )
+            DP.return_value = pipe
+            tr.transcribe_task(args, _make_parser())
+        kw = pipe.call_args.kwargs
+        assert kw["min_speakers"] == 2
+        assert kw["max_speakers"] == 5
+
+    def test_speaker_embeddings_flag_passed_to_diarize(self, mock_asr_pipeline, tmp_path):
+        args = _base_args(
+            output_dir=str(tmp_path),
+            no_align=True,
+            diarize=True,
+            speaker_embeddings=True,
+        )
+        with (
+            patch("whisperx.transcribe.load_model", return_value=mock_asr_pipeline),
+            patch("whisperx.transcribe.load_audio", return_value=np.zeros(16000, dtype=np.float32)),
+            patch("whisperx.transcribe.os.makedirs"),
+            patch("whisperx.transcribe.get_writer"),
+            patch("whisperx.transcribe.DiarizationPipeline") as DP,
+            patch("whisperx.transcribe.assign_word_speakers"),
+        ):
+            pipe = MagicMock()
+            pipe.return_value = (
+                pd.DataFrame(
+                    [
+                        {
+                            "segment": None,
+                            "label": 0,
+                            "speaker": "SPEAKER_00",
+                            "start": 0.0,
+                            "end": 1.0,
+                        }
+                    ]
+                ),
+                {"SPEAKER_00": [0.1, 0.2]},
+            )
+            DP.return_value = pipe
+            tr.transcribe_task(args, _make_parser())
+        assert pipe.call_args.kwargs.get("return_embeddings") is True
+
+    def test_writer_args_popped_from_args(self, mock_asr_pipeline, tmp_path):
+        # highlight_words / max_line_count / max_line_width are popped into
+        # writer_args and passed to the writer.
+        args = _base_args(
+            output_dir=str(tmp_path),
+            no_align=False,
+            highlight_words=True,
+            max_line_count=3,
+            max_line_width=42,
+        )
+        with (
+            patch("whisperx.transcribe.load_model", return_value=mock_asr_pipeline),
+            patch("whisperx.transcribe.load_audio", return_value=np.zeros(16000, dtype=np.float32)),
+            patch("whisperx.transcribe.os.makedirs"),
+            patch("whisperx.transcribe.get_writer") as gw,
+            patch("whisperx.transcribe.load_align_model") as la,
+            patch("whisperx.transcribe.align") as al,
+        ):
+            la.return_value = (MagicMock(), {"language": "en", "dictionary": {}, "type": "hf"})
+            al.return_value = {"segments": [], "word_segments": []}
+            writer = MagicMock()
+            gw.return_value = writer
+            tr.transcribe_task(args, _make_parser())
+        # Writer called with (result, audio_path, options_dict).
+        writer_args = writer.call_args.args
+        # The options dict is the 3rd positional arg.
+        opts = writer_args[2]
+        assert opts["highlight_words"] is True
+        assert opts["max_line_count"] == 3
+        assert opts["max_line_width"] == 42
