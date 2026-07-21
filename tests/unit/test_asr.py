@@ -88,6 +88,27 @@ def _stub_vad():
     return _StubVad()
 
 
+def _chunked_vad(chunks):
+    """Vad subclass returning fixed merge_chunks with the given (start,end) list."""
+    from whisperx.vads.vad import Vad
+
+    class _ChunkedVad(Vad):
+        def __init__(self):
+            super().__init__(0.5)
+
+        def preprocess_audio(self, audio):
+            return audio
+
+        @staticmethod
+        def merge_chunks(segments, chunk_size, onset=0.5, offset=None):
+            return [{"start": s, "end": e, "segments": [(s, e)]} for s, e in chunks]
+
+        def __call__(self, audio):
+            return [MagicMock(start=s, end=e, speaker="UNKNOWN") for s, e in chunks]
+
+    return _ChunkedVad()
+
+
 class TestMlxWhisperPipelineTranscribe:
     def _make_pipeline(self, vad=None, language=None, suppress_tokens=None):
         if vad is None:
@@ -301,6 +322,150 @@ class TestMlxWhisperPipelineTranscribe:
         )
         result = pipe.transcribe(tmp_wav_path)
         assert result["language"] == "en"
+
+    def test_transcribe_verbose_prints_transcript(self, monkeypatch, capsys):
+        # verbose=True prints "Transcript: [...]" for each sub-segment.
+        pipe = self._make_pipeline(vad=_chunked_vad([(0.0, 1.0)]))
+
+        def fake_transcribe(audio_slice, **kwargs):
+            return {
+                "language": "en",
+                "segments": [{"text": "hello", "start": 0.0, "end": 1.0, "avg_logprob": -0.1}],
+            }
+
+        monkeypatch.setattr(asr_mod.mlx_whisper, "transcribe", fake_transcribe)
+        pipe.transcribe(np.zeros(16000, dtype=np.float32), verbose=True)
+        captured = capsys.readouterr()
+        assert "Transcript:" in captured.out
+        assert "hello" in captured.out
+        assert "-->" in captured.out
+
+    def test_transcribe_verbose_false_no_print(self, monkeypatch, capsys):
+        pipe = self._make_pipeline(vad=_chunked_vad([(0.0, 1.0)]))
+        monkeypatch.setattr(
+            asr_mod.mlx_whisper,
+            "transcribe",
+            lambda a, **k: {
+                "language": "en",
+                "segments": [{"text": "hello", "start": 0.0, "end": 1.0}],
+            },
+        )
+        pipe.transcribe(np.zeros(16000, dtype=np.float32), verbose=False)
+        assert capsys.readouterr().out == ""
+
+    def test_transcribe_print_progress_full(self, monkeypatch, capsys):
+        # Two chunks, no combined_progress -> 50.00% then 100.00%.
+        pipe = self._make_pipeline(vad=_chunked_vad([(0.0, 1.0), (1.0, 2.0)]))
+        monkeypatch.setattr(
+            asr_mod.mlx_whisper,
+            "transcribe",
+            lambda a, **k: {"language": "en", "segments": []},
+        )
+        pipe.transcribe(np.zeros(16000 * 2, dtype=np.float32), print_progress=True)
+        out = capsys.readouterr().out
+        assert "Progress: 50.00%..." in out
+        assert "Progress: 100.00%..." in out
+
+    def test_transcribe_print_progress_combined_halves(self, monkeypatch, capsys):
+        # combined_progress=True -> base_progress/2: 25.00% then 50.00%.
+        pipe = self._make_pipeline(vad=_chunked_vad([(0.0, 1.0), (1.0, 2.0)]))
+        monkeypatch.setattr(
+            asr_mod.mlx_whisper,
+            "transcribe",
+            lambda a, **k: {"language": "en", "segments": []},
+        )
+        pipe.transcribe(
+            np.zeros(16000 * 2, dtype=np.float32), print_progress=True, combined_progress=True
+        )
+        out = capsys.readouterr().out
+        assert "Progress: 25.00%..." in out
+        assert "Progress: 50.00%..." in out
+        assert "100.00%..." not in out
+
+    def test_transcribe_print_progress_default_false(self, monkeypatch, capsys):
+        pipe = self._make_pipeline(vad=_chunked_vad([(0.0, 1.0)]))
+        monkeypatch.setattr(
+            asr_mod.mlx_whisper,
+            "transcribe",
+            lambda a, **k: {"language": "en", "segments": []},
+        )
+        # print_progress defaults to False.
+        pipe.transcribe(np.zeros(16000, dtype=np.float32))
+        assert "Progress:" not in capsys.readouterr().out
+
+    def test_transcribe_language_falls_back_to_en(self, monkeypatch):
+        # No language from args, no preset, and model returns None language.
+        pipe = self._make_pipeline(vad=_chunked_vad([(0.0, 1.0)]), language=None)
+        monkeypatch.setattr(
+            asr_mod.mlx_whisper,
+            "transcribe",
+            lambda a, **k: {"language": None, "segments": []},
+        )
+        result = pipe.transcribe(np.zeros(16000, dtype=np.float32))
+        assert result["language"] == "en"
+
+    def test_transcribe_task_defaults_to_transcribe(self, monkeypatch):
+        pipe = self._make_pipeline(vad=_chunked_vad([(0.0, 1.0)]))
+        captured: dict = {}
+        monkeypatch.setattr(
+            asr_mod.mlx_whisper,
+            "transcribe",
+            lambda a, **k: captured.update(k) or {"language": "en", "segments": []},
+        )
+        pipe.transcribe(np.zeros(16000, dtype=np.float32))
+        assert captured["task"] == "transcribe"
+
+    def test_transcribe_suppress_tokens_passed_through(self, monkeypatch):
+        pipe = self._make_pipeline(vad=_chunked_vad([(0.0, 1.0)]), suppress_tokens=[1, 2, 3])
+        captured: dict = {}
+        monkeypatch.setattr(
+            asr_mod.mlx_whisper,
+            "transcribe",
+            lambda a, **k: captured.update(k) or {"language": "en", "segments": []},
+        )
+        pipe.transcribe(np.zeros(16000, dtype=np.float32))
+        assert captured["suppress_tokens"] == [1, 2, 3]
+
+    def test_transcribe_no_suppress_tokens_not_in_kwargs(self, monkeypatch):
+        pipe = self._make_pipeline(vad=_chunked_vad([(0.0, 1.0)]), suppress_tokens=None)
+        captured: dict = {}
+        monkeypatch.setattr(
+            asr_mod.mlx_whisper,
+            "transcribe",
+            lambda a, **k: captured.update(k) or {"language": "en", "segments": []},
+        )
+        pipe.transcribe(np.zeros(16000, dtype=np.float32))
+        assert "suppress_tokens" not in captured
+
+    def test_transcribe_detected_language_logged_once(self, monkeypatch, caplog):
+        pipe = self._make_pipeline(vad=_chunked_vad([(0.0, 1.0)]), language=None)
+        monkeypatch.setattr(
+            asr_mod.mlx_whisper,
+            "transcribe",
+            lambda a, **k: {"language": "de", "segments": []},
+        )
+        import logging
+
+        root_lg = logging.getLogger("whisperx")
+        monkeypatch.setattr(root_lg, "propagate", True)
+        with caplog.at_level(logging.INFO, logger="whisperx"):
+            pipe.transcribe(np.zeros(16000, dtype=np.float32))
+        assert "Detected language: de" in caplog.text
+
+    def test_transcribe_detected_language_not_logged_with_preset(self, monkeypatch, caplog):
+        pipe = self._make_pipeline(vad=_chunked_vad([(0.0, 1.0)]), language="fr")
+        monkeypatch.setattr(
+            asr_mod.mlx_whisper,
+            "transcribe",
+            lambda a, **k: {"language": "fr", "segments": []},
+        )
+        import logging
+
+        root_lg = logging.getLogger("whisperx")
+        monkeypatch.setattr(root_lg, "propagate", True)
+        with caplog.at_level(logging.INFO, logger="whisperx"):
+            pipe.transcribe(np.zeros(16000, dtype=np.float32))
+        assert "Detected language:" not in caplog.text
 
     def test_non_vad_vad_model_uses_pyannote_interface(self, monkeypatch):
         # When vad_model is NOT a Vad subclass, the pyannote static interface

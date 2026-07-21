@@ -237,6 +237,68 @@ class TestIntervalTree:
         out = assign_word_speakers(df, result)
         assert out["segments"][0]["speaker"] == "SPEAKER_01"
 
+    def test_word_fill_nearest_when_no_overlap(self):
+        # A word outside all diarization segments uses fill_nearest to pick
+        # the closest speaker by midpoint.
+        df = self._diarize_df([(0.0, 1.0, "SPEAKER_00")])
+        result: AlignedTranscriptionResult = {
+            "segments": [
+                {
+                    "start": 0.0,
+                    "end": 2.0,
+                    "text": "later",
+                    "words": [{"word": "later", "start": 1.5, "end": 1.8, "score": 1.0}],
+                    "chars": None,
+                }
+            ],
+            "word_segments": [],
+        }
+        out = assign_word_speakers(df, result, fill_nearest=True)
+        aligned3: AlignedTranscriptionResult = out  # pyrefly: ignore[bad-assignment]
+        assert aligned3["segments"][0]["words"][0]["speaker"] == "SPEAKER_00"
+
+    def test_word_no_end_key_defaults_to_start(self):
+        # A word without "end" defaults end=start. The query for [start, start]
+        # has zero intersection, so fill_nearest assigns closest speaker by
+        # midpoint. Exercises get("end", word_start) and fill_nearest word path.
+        df = self._diarize_df([(0.0, 1.0, "SPEAKER_00")])
+        result: AlignedTranscriptionResult = {
+            "segments": [
+                {
+                    "start": 0.0,
+                    "end": 1.0,
+                    "text": "hi",
+                    "words": [{"word": "hi", "start": 0.5, "score": 1.0}],  # pyrefly: ignore[bad-typed-dict-key]
+                    "chars": None,
+                }
+            ],
+            "word_segments": [],
+        }
+        out = assign_word_speakers(df, result, fill_nearest=True)
+        aligned4: AlignedTranscriptionResult = out  # pyrefly: ignore[bad-assignment]
+        assert aligned4["segments"][0]["words"][0]["speaker"] == "SPEAKER_00"
+
+    def test_word_fill_nearest_none_leaves_unset(self):
+        # Empty diarization df returns early; but a word with no overlap and
+        # fill_nearest finds no nearest speaker -> word speaker unset.
+        df = self._diarize_df([(0.0, 1.0, "SPEAKER_00")])
+        result: AlignedTranscriptionResult = {
+            "segments": [
+                {
+                    "start": 5.0,
+                    "end": 6.0,
+                    "text": "far",
+                    "words": [{"word": "far", "start": 5.5, "end": 5.8, "score": 1.0}],
+                    "chars": None,
+                }
+            ],
+            "word_segments": [],
+        }
+        out = assign_word_speakers(df, result, fill_nearest=True)
+        aligned5: AlignedTranscriptionResult = out  # pyrefly: ignore[bad-assignment]
+        # find_nearest still returns the closest interval speaker (SPEAKER_00).
+        assert aligned5["segments"][0]["words"][0]["speaker"] == "SPEAKER_00"
+
 
 class TestEstimateClusters:
     def test_returns_min_when_embeddings_too_few(self):
@@ -252,12 +314,58 @@ class TestEstimateClusters:
             dtype=np.float32,
         )
         n = DiarizationPipeline._estimate_clusters(embs, min_s=1, max_s=4)
-        assert 1 <= n <= 4
+        assert n == 2
 
     def test_max_s_bounds_result(self):
         embs = np.array([[1.0, 0.0], [1.0, 0.0], [0.0, 1.0]], dtype=np.float32)
         n = DiarizationPipeline._estimate_clusters(embs, min_s=1, max_s=2)
         assert n <= 2
+
+    def test_two_identical_pairs_picks_two(self):
+        # Two perfectly separated clusters -> n=2 maximizes silhouette.
+        embs = np.array(
+            [[1.0, 0.0], [1.0, 0.0], [0.0, 1.0], [0.0, 1.0]],
+            dtype=np.float32,
+        )
+        n = DiarizationPipeline._estimate_clusters(embs, min_s=1, max_s=4)
+        assert n == 2
+
+    def test_all_singletons_returns_min_when_min_is_one(self):
+        # All distinct embeddings -> every cluster has one member ->
+        # sims empty -> score 0.0 for all n -> first (min_s) wins.
+        embs = np.array(
+            [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]],
+            dtype=np.float32,
+        )
+        n = DiarizationPipeline._estimate_clusters(embs, min_s=1, max_s=3)
+        assert n == 1
+
+    def test_all_singletons_returns_min_when_min_is_two(self):
+        # Same as above but min_s=2; the loop starts at 2.
+        embs = np.array(
+            [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]],
+            dtype=np.float32,
+        )
+        n = DiarizationPipeline._estimate_clusters(embs, min_s=2, max_s=3)
+        assert n == 2
+
+    def test_min_s_lower_bound_respected(self):
+        # min_s=2 forces the search to start at 2 even if 1 would score better.
+        embs = np.array(
+            [[1.0, 0.0], [1.0, 0.0], [0.0, 1.0], [0.0, 1.0]],
+            dtype=np.float32,
+        )
+        n = DiarizationPipeline._estimate_clusters(embs, min_s=2, max_s=4)
+        assert n >= 2
+
+    def test_max_s_caps_upper_bound(self):
+        # With max_s=1, only n=1 is considered regardless of data.
+        embs = np.array(
+            [[1.0, 0.0], [1.0, 0.0], [0.0, 1.0], [0.0, 1.0]],
+            dtype=np.float32,
+        )
+        n = DiarizationPipeline._estimate_clusters(embs, min_s=1, max_s=1)
+        assert n == 1
 
 
 class TestDiarizationPipelineCall:
@@ -370,6 +478,50 @@ class TestBinarizeSegments:
             out = pipe._binarize_segments(np.array([0.9]), np.array([0.5]))
         assert out == [(0.0, 1.0), (2.0, 3.0)]
         assert all(isinstance(s, float) and isinstance(e, float) for s, e in out)
+
+    def test_binarize_constructed_with_exact_params(self, monkeypatch):
+        # Assert _Binarize receives onset/offset from the pipeline plus the
+        # fixed min_duration_on/min_duration_off/max_duration defaults.
+        pipe = DiarizationPipeline.__new__(DiarizationPipeline)
+        pipe.vad_onset = 0.5
+        pipe.vad_offset = 0.363
+
+        class FakeSeg:
+            def __init__(self, start, end):
+                self.start = start
+                self.end = end
+
+        with patch("whisperx.vads.pyannote._Binarize") as BinCls:
+            inst = MagicMock()
+            inst.return_value = [FakeSeg(0.0, 1.0)]
+            BinCls.return_value = inst
+            pipe._binarize_segments(np.array([0.9]), np.array([0.5]))
+        BinCls.assert_called_once_with(
+            onset=0.5,
+            offset=0.363,
+            min_duration_on=0.1,
+            min_duration_off=0.1,
+            max_duration=30.0,
+        )
+
+    def test_binarize_onset_offset_propagated_from_pipeline(self, monkeypatch):
+        pipe = DiarizationPipeline.__new__(DiarizationPipeline)
+        pipe.vad_onset = 0.7
+        pipe.vad_offset = 0.2
+
+        class FakeSeg:
+            def __init__(self, start, end):
+                self.start = start
+                self.end = end
+
+        with patch("whisperx.vads.pyannote._Binarize") as BinCls:
+            inst = MagicMock()
+            inst.return_value = [FakeSeg(0.0, 1.0)]
+            BinCls.return_value = inst
+            pipe._binarize_segments(np.array([0.9]), np.array([0.5]))
+        call_kwargs = BinCls.call_args.kwargs
+        assert call_kwargs["onset"] == 0.7
+        assert call_kwargs["offset"] == 0.2
 
 
 # Default-argument and real-data tests: kill default-value and construction
