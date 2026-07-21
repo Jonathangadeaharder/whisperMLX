@@ -12,8 +12,8 @@ class Vad:
     def merge_chunks(
         segments,
         chunk_size,
-        onset: float,  # noqa: ARG004 - Vad interface conformance
-        offset: float | None,  # noqa: ARG004 - Vad interface conformance
+        onset: float,  # noqa: ARG004
+        offset: float | None,  # noqa: ARG004
     ):
         """
         Merge operation described in paper

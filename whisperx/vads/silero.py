@@ -19,7 +19,7 @@ class Silero(Vad):
 
         self._detect_speech = detect_speech
 
-    def __call__(self, audio, **kwargs):  # noqa: ARG002 - Vad interface conformance
+    def __call__(self, audio, **kwargs):  # noqa: ARG002
         """Use Silero (MLX) to get segments of speech."""
         sample_rate = audio["sample_rate"]
         if sample_rate != 16000:

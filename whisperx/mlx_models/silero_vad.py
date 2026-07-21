@@ -57,7 +57,7 @@ def _conv1d(x, weight, bias, stride=1, padding=0):
     return conv(x)
 
 
-def _lstm_cell(x, h, c, Wx, Wh, bias):  # noqa: N803 - LSTM weight-matrix names
+def _lstm_cell(x, h, c, Wx, Wh, bias):  # noqa: N803
     # x: (seq, 128), h/c: (128,). Wx/Wh: (512, 128), bias: (512,).
     # PyTorch LSTM: gates = x @ Wx.T + h @ Wh.T + bias, each row is (1, 512).
     # 4 gates: i, f, g, o (PyTorch ordering).
@@ -151,7 +151,7 @@ def _forward_chunk(chunk, h, c, weights):
     return x, h, c
 
 
-def _probs_to_segments(probs, threshold, num_samples, total_samples, max_speech_s, padded_total):  # noqa: ARG001 - padding bookkeeping
+def _probs_to_segments(probs, threshold, num_samples, total_samples, max_speech_s, padded_total):  # noqa: ARG001
     """Convert per-chunk probabilities to (start_sample, end_sample) segments."""
     max_samples = int(max_speech_s * 16000)
     segments = []

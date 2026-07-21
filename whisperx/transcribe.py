@@ -123,7 +123,6 @@ def transcribe_task(args: dict, parser: argparse.ArgumentParser):  # noqa: PLR09
     # The list holds either TranscriptionResult (pre-align) or
     # AlignedTranscriptionResult (post-align); the writer accepts both.
     results: list[tuple[TranscriptionResult | AlignedTranscriptionResult, str]] = []
-    # model = load_model(model_name, device=device, download_root=model_dir)
     model = load_model(
         model_name,
         device=device,
@@ -231,7 +230,7 @@ def transcribe_task(args: dict, parser: argparse.ArgumentParser):  # noqa: PLR09
                 diarize_segments = diarize_result  # pyrefly: ignore[bad-assignment]
                 speaker_embeddings = None
 
-            res = assign_word_speakers(diarize_segments, res, speaker_embeddings)  # noqa: PLW2901 - intentional rebind to enriched result
+            res = assign_word_speakers(diarize_segments, res, speaker_embeddings)  # noqa: PLW2901
             results.append((res, input_audio_path))
     # >> Write
     for result, audio_path in results:

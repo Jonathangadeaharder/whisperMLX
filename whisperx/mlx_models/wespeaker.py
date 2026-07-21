@@ -79,7 +79,7 @@ def _mel_fbank():
     return _mel_filterbank()
 
 
-def compute_log_mel(audio, sample_rate=SAMPLE_RATE):  # noqa: ARG001 - fixed at 16kHz
+def compute_log_mel(audio, sample_rate=SAMPLE_RATE):  # noqa: ARG001
     """Compute log-mel spectrogram from raw audio.
 
     audio: mx.array (samples,) or numpy array, 16kHz.
@@ -220,7 +220,8 @@ def _wespeaker_forward(log_mel, weights):
     mean = x.mean(axis=1)  # (B, F, C)
     std = mx.sqrt(x.var(axis=1) + 1e-5)
     pooled = mx.concatenate([mean, std], axis=-1)  # (B, F, 2C)
-    B = pooled.shape[0]  # noqa: N806 - batch dim, tensor-shape convention
+    # Batch dim; tensor-shape convention.
+    B = pooled.shape[0]  # noqa: N806
     pooled = pooled.reshape(B, -1)  # (B, F * 2C) = (B, 5120)
 
     # Embedding layer.

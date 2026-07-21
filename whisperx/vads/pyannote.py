@@ -64,7 +64,7 @@ class _Binarize:
         start = timestamps[0]
         curr_scores = [scores[0]]
         curr_timestamps = [start]
-        t = start
+        last_t = start
 
         for t, y in zip(timestamps[1:], scores[1:], strict=False):
             if is_active:
@@ -92,9 +92,10 @@ class _Binarize:
                 is_active = True
                 curr_scores = [y]
                 curr_timestamps = [t]
+            last_t = t
 
         if is_active:
-            segments.append(_SpeechSegment(start - self.pad_onset, t + self.pad_offset))
+            segments.append(_SpeechSegment(start - self.pad_onset, last_t + self.pad_offset))
 
         # Fill gaps shorter than min_duration_off and merge overlaps.
         if self.min_duration_off > 0 and len(segments) > 1:
@@ -126,7 +127,7 @@ class Pyannote(Vad):
 
         self._segment_audio = segment_audio
 
-    def __call__(self, audio, **kwargs):  # noqa: ARG002 - Vad interface conformance
+    def __call__(self, audio, **kwargs):  # noqa: ARG002
         # Lazy import: mlx.core loads the MLX runtime only at call time.
         import mlx.core as mx  # noqa: PLC0415  # pyrefly: ignore[missing-import]
 

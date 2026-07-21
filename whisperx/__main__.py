@@ -6,7 +6,8 @@ from whisperx.log_utils import setup_logging
 from whisperx.utils import LANGUAGES, TO_LANGUAGE_CODE, optional_float, optional_int, str2bool
 
 
-def cli():  # noqa: PLR0915 - argparse spec, one statement per flag
+# argparse spec: one statement per flag.
+def cli():  # noqa: PLR0915
     # fmt: off
     parser = argparse.ArgumentParser(formatter_class=argparse.ArgumentDefaultsHelpFormatter)
     parser.add_argument("audio", nargs="+", type=str, help="audio file(s) to transcribe")

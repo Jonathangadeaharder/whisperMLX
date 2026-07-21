@@ -65,7 +65,8 @@ class MlxWhisperPipeline:
         self.suppress_numerals = suppress_numerals
         self.suppress_tokens = suppress_tokens
 
-    def transcribe(  # noqa: PLR0912 - VAD + per-segment loop, split hurts flow
+    # VAD + per-segment loop; split hurts flow.
+    def transcribe(  # noqa: PLR0912
         self,
         audio: str | np.ndarray,
         batch_size: int | None = None,
@@ -167,18 +168,18 @@ class MlxWhisperPipeline:
 def load_model(
     whisper_arch: str,
     device: str,
-    device_index: int = 0,  # noqa: ARG001 - kept for whisperX API conformance
+    device_index: int = 0,  # noqa: ARG001
     compute_type: str = "default",
     asr_options: dict | None = None,
     language: str | None = None,
     vad_model: Vad | None = None,
     vad_method: str | None = "pyannote",
     vad_options: dict | None = None,
-    model: object | None = None,  # noqa: ARG001 - kept for whisperX API conformance
-    task: str = "transcribe",  # noqa: ARG001 - kept for whisperX API conformance
-    download_root: str | None = None,  # noqa: ARG001 - kept for whisperX API conformance
-    local_files_only: bool = False,  # noqa: ARG001 - kept for whisperX API conformance
-    threads: int = 4,  # noqa: ARG001 - kept for whisperX API conformance
+    model: object | None = None,  # noqa: ARG001
+    task: str = "transcribe",  # noqa: ARG001
+    download_root: str | None = None,  # noqa: ARG001
+    local_files_only: bool = False,  # noqa: ARG001
+    threads: int = 4,  # noqa: ARG001
     use_auth_token: str | bool | None = None,
 ) -> MlxWhisperPipeline:
     """Load a Whisper model for inference via mlx-whisper.
