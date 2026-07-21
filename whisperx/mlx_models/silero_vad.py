@@ -12,9 +12,9 @@ transpose is needed.
 
 from functools import lru_cache
 
-import mlx.core as mx
-import mlx.nn as nn
+import mlx.core as mx  # pyrefly: ignore[missing-import]
 from huggingface_hub import hf_hub_download
+from mlx import nn
 from safetensors import safe_open
 
 _REPO = "aufklarer/Silero-VAD-v5-MLX"
@@ -36,7 +36,7 @@ def _load_weights():
     path = hf_hub_download(_REPO, "model.safetensors")
     weights = {}
     with safe_open(path, framework="np") as f:
-        for k in f.keys():
+        for k in f.keys():  # noqa: SIM118
             weights[k] = mx.array(f.get_tensor(k))
     return weights
 
@@ -57,13 +57,13 @@ def _conv1d(x, weight, bias, stride=1, padding=0):
     return conv(x)
 
 
-def _lstm_cell(x, h, c, Wx, Wh, bias):
+def _lstm_cell(x, h, c, Wx, Wh, bias):  # noqa: N803 - LSTM weight-matrix names
     # x: (seq, 128), h/c: (128,). Wx/Wh: (512, 128), bias: (512,).
     # PyTorch LSTM: gates = x @ Wx.T + h @ Wh.T + bias, each row is (1, 512).
     # 4 gates: i, f, g, o (PyTorch ordering).
     for t in range(x.shape[0]):
         x_t = x[t : t + 1]  # (1, 128)
-        h_row = h[None, :]   # (1, 128)
+        h_row = h[None, :]  # (1, 128)
         gates = x_t @ Wx.T + h_row @ Wh.T + bias
         i = _sigmoid(gates[0, 0:128])
         f = _sigmoid(gates[0, 128:256])
@@ -74,8 +74,12 @@ def _lstm_cell(x, h, c, Wx, Wh, bias):
     return h, c
 
 
-def detect_speech(audio: mx.array, threshold: float = 0.5, chunk_size: int = 512,
-                  max_speech_duration_s: float = 30.0):
+def detect_speech(
+    audio: mx.array,
+    threshold: float = 0.5,
+    chunk_size: int = 512,
+    max_speech_duration_s: float = 30.0,
+):
     """Run streaming VAD on a 1D audio array (16kHz float32).
 
     chunk_size is the Silero internal sample-chunk size (512).
@@ -104,8 +108,9 @@ def detect_speech(audio: mx.array, threshold: float = 0.5, chunk_size: int = 512
         out, h, c = _forward_chunk(chunk, h, c, weights)
         probs.append(float(out[0, 0]))
 
-    return _probs_to_segments(probs, threshold, num_samples, total,
-                              max_speech_duration_s, audio.shape[1])
+    return _probs_to_segments(
+        probs, threshold, num_samples, total, max_speech_duration_s, audio.shape[1]
+    )
 
 
 def _forward_chunk(chunk, h, c, weights):
@@ -115,8 +120,7 @@ def _forward_chunk(chunk, h, c, weights):
     x = x[:, :, None]  # (1, L, 1)
 
     # STFT: conv1d with 258 output bins, kernel 256, stride 128.
-    x = _conv1d(x, weights["stft.weight"], mx.zeros((258,)),
-                stride=HOP_LENGTH, padding=0)
+    x = _conv1d(x, weights["stft.weight"], mx.zeros((258,)), stride=HOP_LENGTH, padding=0)
     # x: (1, L_out, 258). Split into real/imag halves for magnitude.
     real = x[:, :, :CUTOFF]
     imag = x[:, :, CUTOFF:]
@@ -125,28 +129,29 @@ def _forward_chunk(chunk, h, c, weights):
     # Encoder: 4 conv1d + ReLU. strides [1, 2, 2, 1], kernels [3,3,3,3].
     strides = [1, 2, 2, 1]
     for i in range(4):
-        x = _conv1d(x, weights[f"encoder.{i}.weight"],
-                    weights[f"encoder.{i}.bias"],
-                    stride=strides[i], padding=1)
+        x = _conv1d(
+            x,
+            weights[f"encoder.{i}.weight"],
+            weights[f"encoder.{i}.bias"],
+            stride=strides[i],
+            padding=1,
+        )
         x = nn.relu(x)
 
     # x: (1, L_out, 128). Transpose to (L_out, 128) for LSTM.
     x = x[0]  # (L_out, 128)
 
-    h, c = _lstm_cell(x, h, c, weights["lstm.Wx"],
-                      weights["lstm.Wh"], weights["lstm.bias"])
+    h, c = _lstm_cell(x, h, c, weights["lstm.Wx"], weights["lstm.Wh"], weights["lstm.bias"])
 
     # Decoder: relu(h) -> conv1d(128,1,1) -> sigmoid -> mean.
     x = nn.relu(h)[None, None, :]  # (1, 1, 128)
-    x = _conv1d(x, weights["decoder.weight"], weights["decoder.bias"],
-                stride=1, padding=0)
+    x = _conv1d(x, weights["decoder.weight"], weights["decoder.bias"], stride=1, padding=0)
     x = _sigmoid(x)
     x = x.mean(axis=1)  # (1, 1)
     return x, h, c
 
 
-def _probs_to_segments(probs, threshold, num_samples, total_samples,
-                       max_speech_s, padded_total):
+def _probs_to_segments(probs, threshold, num_samples, total_samples, max_speech_s, padded_total):  # noqa: ARG001 - padding bookkeeping
     """Convert per-chunk probabilities to (start_sample, end_sample) segments."""
     max_samples = int(max_speech_s * 16000)
     segments = []
@@ -164,10 +169,9 @@ def _probs_to_segments(probs, threshold, num_samples, total_samples,
                 segments.append((start, sample_end))
                 start = sample_end
                 in_speech = True
-        else:
-            if in_speech:
-                segments.append((start, sample_end))
-                in_speech = False
+        elif in_speech:
+            segments.append((start, sample_end))
+            in_speech = False
     if in_speech:
         segments.append((start, total_samples))
     return segments

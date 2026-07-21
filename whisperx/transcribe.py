@@ -4,19 +4,20 @@ import os
 import warnings
 
 import numpy as np
+import pandas as pd
 
 from whisperx.alignment import align, load_align_model
 from whisperx.asr import load_model
 from whisperx.audio import load_audio
 from whisperx.diarize import DiarizationPipeline, assign_word_speakers
+from whisperx.log_utils import get_logger
 from whisperx.schema import AlignedTranscriptionResult, TranscriptionResult
 from whisperx.utils import LANGUAGES, TO_LANGUAGE_CODE, get_writer
-from whisperx.log_utils import get_logger
 
 logger = get_logger(__name__)
 
 
-def transcribe_task(args: dict, parser: argparse.ArgumentParser):
+def transcribe_task(args: dict, parser: argparse.ArgumentParser):  # noqa: PLR0912, PLR0915
     """Transcription task to be called from CLI.
 
     Args:
@@ -64,7 +65,7 @@ def transcribe_task(args: dict, parser: argparse.ArgumentParser):
     return_speaker_embeddings: bool = args.pop("speaker_embeddings")
 
     if return_speaker_embeddings and not diarize:
-        warnings.warn("--speaker_embeddings has no effect without --diarize")
+        warnings.warn("--speaker_embeddings has no effect without --diarize", stacklevel=2)
 
     if args["language"] is not None:
         args["language"] = args["language"].lower()
@@ -77,7 +78,7 @@ def transcribe_task(args: dict, parser: argparse.ArgumentParser):
     if model_name.endswith(".en") and args["language"] != "en":
         if args["language"] is not None:
             warnings.warn(
-                f"{model_name} is an English-only model but received '{args['language']}'; using English instead."
+                f"{model_name} is an English-only model but received '{args['language']}'; using English instead.", stacklevel=2
             )
         args["language"] = "en"
     align_language = (
@@ -115,11 +116,13 @@ def transcribe_task(args: dict, parser: argparse.ArgumentParser):
             if args[option]:
                 parser.error(f"--{option} not possible with --no_align")
     if args["max_line_count"] and not args["max_line_width"]:
-        warnings.warn("--max_line_count has no effect without --max_line_width")
+        warnings.warn("--max_line_count has no effect without --max_line_width", stacklevel=2)
     writer_args = {arg: args.pop(arg) for arg in word_options}
 
     # Part 1: VAD & ASR Loop
-    results = []
+    # The list holds either TranscriptionResult (pre-align) or
+    # AlignedTranscriptionResult (post-align); the writer accepts both.
+    results: list[tuple[TranscriptionResult | AlignedTranscriptionResult, str]] = []
     # model = load_model(model_name, device=device, download_root=model_dir)
     model = load_model(
         model_name,
@@ -144,7 +147,7 @@ def transcribe_task(args: dict, parser: argparse.ArgumentParser):
         audio = load_audio(audio_path)
         # >> VAD & ASR
         logger.info("Performing transcription...")
-        result: TranscriptionResult = model.transcribe(
+        result = model.transcribe(
             audio,
             batch_size=batch_size,
             chunk_size=chunk_size,
@@ -164,14 +167,12 @@ def transcribe_task(args: dict, parser: argparse.ArgumentParser):
         align_model, align_metadata = load_align_model(
             align_language, device, model_name=align_model, model_dir=model_dir, model_cache_only=model_cache_only
         )
-        for result, audio_path in tmp_results:
+        for align_in, audio_path in tmp_results:
             # >> Align
-            if len(tmp_results) > 1:
-                input_audio = audio_path
-            else:
-                # lazily load audio from part 1
-                input_audio = audio
+            # lazily load audio from part 1 when there is a single result
+            input_audio = audio_path if len(tmp_results) > 1 else audio
 
+            result = align_in
             if align_model is not None and len(result["segments"]) > 0:
                 if result.get("language", "en") != align_metadata["language"]:
                     # load new language
@@ -182,7 +183,10 @@ def transcribe_task(args: dict, parser: argparse.ArgumentParser):
                         result["language"], device, model_dir=model_dir, model_cache_only=model_cache_only
                     )
                 logger.info("Performing alignment...")
-                result: AlignedTranscriptionResult = align(
+                # result widens from TranscriptionResult to the aligned shape;
+                # the writer accepts both. pyrefly keeps the first declared
+                # type, so suppress the bad-assignment on this rebind.
+                result = align(  # pyrefly: ignore[bad-assignment]
                     result["segments"],
                     align_model,
                     align_metadata,
@@ -193,7 +197,7 @@ def transcribe_task(args: dict, parser: argparse.ArgumentParser):
                     print_progress=print_progress,
                 )
 
-            results.append((result, audio_path))
+            results.append((result, audio_path))  # pyrefly: ignore[bad-argument-type]
 
         # Unload align model
         del align_model
@@ -210,23 +214,27 @@ def transcribe_task(args: dict, parser: argparse.ArgumentParser):
         logger.info(f"Using model: {diarize_model_name}")
         results = []
         diarize_model = DiarizationPipeline(model_name=diarize_model_name, token=hf_token, device=device, cache_dir=model_dir)
-        for result, input_audio_path in tmp_results:
+        for res, input_audio_path in tmp_results:
             diarize_result = diarize_model(
-                input_audio_path, 
-                min_speakers=min_speakers, 
-                max_speakers=max_speakers, 
+                input_audio_path,
+                min_speakers=min_speakers,
+                max_speakers=max_speakers,
                 return_embeddings=return_speaker_embeddings
             )
 
+            diarize_segments: pd.DataFrame
+            speaker_embeddings: dict[str, list[float]] | None
             if return_speaker_embeddings:
-                diarize_segments, speaker_embeddings = diarize_result
+                # pyrefly can't narrow the tuple branch of the union return.
+                diarize_segments, speaker_embeddings = diarize_result  # pyrefly: ignore[bad-assignment]
             else:
-                diarize_segments = diarize_result
+                diarize_segments = diarize_result  # pyrefly: ignore[bad-assignment]
                 speaker_embeddings = None
 
-            result = assign_word_speakers(diarize_segments, result, speaker_embeddings)
-            results.append((result, input_audio_path))
+            res = assign_word_speakers(diarize_segments, res, speaker_embeddings)  # noqa: PLW2901 - intentional rebind to enriched result
+            results.append((res, input_audio_path))
     # >> Write
     for result, audio_path in results:
         result["language"] = align_language
-        writer(result, audio_path, writer_args)
+        # writer expects dict; TranscriptionResult is a TypedDict (dict at runtime).
+        writer(result, audio_path, writer_args)  # pyrefly: ignore[bad-argument-type]

@@ -2,27 +2,28 @@
 Forced Alignment with Whisper
 C. Max Bain
 """
-from dataclasses import dataclass
-from typing import Iterable, Optional, Union, List
 
+from collections.abc import Iterable
+from dataclasses import dataclass
+
+import nltk
 import numpy as np
 import pandas as pd
 import torch
+from nltk.data import load as nltk_load
 from transformers import Wav2Vec2ForCTC, Wav2Vec2Processor
 
 from whisperx.audio import SAMPLE_RATE, load_audio
-from whisperx.utils import interpolate_nans, PUNKT_LANGUAGES
+from whisperx.log_utils import get_logger
 from whisperx.schema import (
     AlignedTranscriptionResult,
-    SingleSegment,
-    SingleAlignedSegment,
-    SingleWordSegment,
-    SegmentData,
     ProgressCallback,
+    SegmentData,
+    SingleAlignedSegment,
+    SingleSegment,
+    SingleWordSegment,
 )
-import nltk
-from nltk.data import load as nltk_load
-from whisperx.log_utils import get_logger
+from whisperx.utils import PUNKT_LANGUAGES, interpolate_nans
 
 logger = get_logger(__name__)
 
@@ -50,7 +51,7 @@ DEFAULT_ALIGN_MODELS_HF = {
     "tr": "mpoyraz/wav2vec2-xls-r-300m-cv7-turkish",
     "da": "saattrupdan/wav2vec2-xls-r-300m-ftspeech",
     "he": "imvladikon/wav2vec2-xls-r-300m-hebrew",
-    "vi": 'nguyenvulebinh/wav2vec2-base-vi-vlsp2020',
+    "vi": "nguyenvulebinh/wav2vec2-base-vi-vlsp2020",
     "ko": "kresnik/wav2vec2-large-xlsr-korean",
     "ur": "kingabzpro/wav2vec2-large-xls-r-300m-Urdu",
     "te": "anuragshas/wav2vec2-large-xlsr-53-telugu",
@@ -73,38 +74,59 @@ DEFAULT_ALIGN_MODELS_HF = {
 }
 
 
-def load_align_model(language_code: str, device: str, model_name: Optional[str] = None, model_dir=None, model_cache_only: bool = False):
+def load_align_model(
+    language_code: str,
+    device: str,
+    model_name: str | None = None,
+    model_dir=None,
+    model_cache_only: bool = False,
+):
     if model_name is None:
         # use default model
         if language_code in DEFAULT_ALIGN_MODELS_HF:
             model_name = DEFAULT_ALIGN_MODELS_HF[language_code]
         else:
-            logger.error(f"No default alignment model for language: {language_code}. "
-                         f"Please find a wav2vec2.0 model finetuned on this language at https://huggingface.co/models, "
-                         f"then pass the model name via --align_model [MODEL_NAME]")
+            logger.error(
+                f"No default alignment model for language: {language_code}. "
+                f"Please find a wav2vec2.0 model finetuned on this language at https://huggingface.co/models, "
+                f"then pass the model name via --align_model [MODEL_NAME]"
+            )
             raise ValueError(f"No default align-model for language: {language_code}")
 
     try:
-        processor = Wav2Vec2Processor.from_pretrained(model_name, cache_dir=model_dir, local_files_only=model_cache_only)
-        align_model = Wav2Vec2ForCTC.from_pretrained(model_name, cache_dir=model_dir, local_files_only=model_cache_only)
+        processor = Wav2Vec2Processor.from_pretrained(
+            model_name, cache_dir=model_dir, local_files_only=model_cache_only
+        )
+        align_model = Wav2Vec2ForCTC.from_pretrained(
+            model_name, cache_dir=model_dir, local_files_only=model_cache_only
+        )
     except Exception as e:
         print(e)
-        print(f"Error loading model from huggingface, check https://huggingface.co/models for finetuned wav2vec2.0 models")
-        raise ValueError(f'The chosen align_model "{model_name}" could not be found in huggingface (https://huggingface.co/models)')
+        print(
+            "Error loading model from huggingface, check https://huggingface.co/models for finetuned wav2vec2.0 models"
+        )
+        raise ValueError(
+            f'The chosen align_model "{model_name}" could not be found in huggingface (https://huggingface.co/models)'
+        ) from e
     align_model = align_model.to(device)
-    labels = processor.tokenizer.get_vocab()
+    # Wav2Vec2Processor exposes .tokenizer at runtime (stubs omit it).
+    labels = processor.tokenizer.get_vocab()  # pyrefly: ignore[missing-attribute]
     align_dictionary = {char.lower(): code for char, code in labels.items()}
 
-    align_metadata = {"language": language_code, "dictionary": align_dictionary, "type": "huggingface"}
+    align_metadata = {
+        "language": language_code,
+        "dictionary": align_dictionary,
+        "type": "huggingface",
+    }
 
     return align_model, align_metadata
 
 
-def align(
+def align(  # noqa: PLR0912, PLR0915 - complex CTC alignment loop, split hurts readability
     transcript: Iterable[SingleSegment],
     model: torch.nn.Module,
     align_model_metadata: dict,
-    audio: Union[str, np.ndarray, torch.Tensor],
+    audio: str | np.ndarray | torch.Tensor,
     device: str,
     interpolate_method: str = "nearest",
     return_char_alignments: bool = False,
@@ -123,7 +145,10 @@ def align(
     if len(audio.shape) == 1:
         audio = audio.unsqueeze(0)
 
-    MAX_DURATION = audio.shape[1] / SAMPLE_RATE
+    # Computed from audio length; uppercase marks a runtime constant.
+    MAX_DURATION = audio.shape[1] / SAMPLE_RATE  # noqa: N806
+
+    transcript = list(transcript)
 
     model_dictionary = align_model_metadata["dictionary"]
     model_lang = align_model_metadata["language"]
@@ -131,17 +156,17 @@ def align(
     # (trellis, backtrack, wildcard) is numpy below.
 
     # Use language-specific Punkt model if available otherwise we fallback to English.
-    punkt_lang = PUNKT_LANGUAGES.get(model_lang, 'english')
+    punkt_lang = PUNKT_LANGUAGES.get(model_lang, "english")
     try:
-        sentence_splitter = nltk_load(f'tokenizers/punkt_tab/{punkt_lang}.pickle')
+        sentence_splitter = nltk_load(f"tokenizers/punkt_tab/{punkt_lang}.pickle")
     except LookupError as e:
         logger.info("Downloading NLTK punkt_tab data for sentence splitting...")
-        if not nltk.download('punkt_tab', quiet=True):
+        if not nltk.download("punkt_tab", quiet=True):
             raise RuntimeError(
                 "Failed to download NLTK 'punkt_tab' data, which is required for sentence splitting. "
                 "Check your network connection, or install it manually with: python -m nltk.downloader punkt_tab"
             ) from e
-        sentence_splitter = nltk_load(f'tokenizers/punkt_tab/{punkt_lang}.pickle')
+        sentence_splitter = nltk_load(f"tokenizers/punkt_tab/{punkt_lang}.pickle")
 
     # 1. Preprocess to keep only characters in dictionary
     total_segments = len(transcript)
@@ -159,10 +184,7 @@ def align(
         text = segment["text"]
 
         # split into words
-        if model_lang not in LANGUAGES_WITHOUT_SPACES:
-            per_word = text.split(" ")
-        else:
-            per_word = text
+        per_word = text.split(" ") if model_lang not in LANGUAGES_WITHOUT_SPACES else text
 
         clean_char, clean_cdx = [], []
         for cdx, char in enumerate(text):
@@ -172,11 +194,9 @@ def align(
                 char_ = char_.replace(" ", "|")
 
             # ignore whitespace at beginning and end of transcript
-            if cdx < num_leading:
+            if cdx < num_leading or cdx > len(text) - num_trailing - 1:
                 pass
-            elif cdx > len(text) - num_trailing - 1:
-                pass
-            elif char_ in model_dictionary.keys():
+            elif char_ in model_dictionary:
                 clean_char.append(char_)
                 clean_cdx.append(cdx)
             elif char_ not in (" ", "|"):
@@ -192,14 +212,13 @@ def align(
             "clean_char": clean_char,
             "clean_cdx": clean_cdx,
             "clean_wdx": clean_wdx,
-            "sentence_spans": sentence_spans
+            "sentence_spans": sentence_spans,
         }
 
-    aligned_segments: List[SingleAlignedSegment] = []
+    aligned_segments: list[SingleAlignedSegment] = []
 
     # 2. Get prediction matrix from alignment model & align
     for sdx, segment in enumerate(transcript):
-
         t1 = segment["start"]
         t2 = segment["end"]
         text = segment["text"]
@@ -221,12 +240,16 @@ def align(
 
         # check we can align
         if len(segment_data[sdx]["clean_char"]) == 0:
-            logger.warning(f'Failed to align segment ("{segment["text"]}"): no characters in this segment found in model dictionary, resorting to original')
+            logger.warning(
+                f'Failed to align segment ("{segment["text"]}"): no characters in this segment found in model dictionary, resorting to original'
+            )
             aligned_segments.append(aligned_seg)
             continue
 
         if t1 >= MAX_DURATION:
-            logger.warning(f'Failed to align segment ("{segment["text"]}"): original start time longer than audio duration, skipping')
+            logger.warning(
+                f'Failed to align segment ("{segment["text"]}"): original start time longer than audio duration, skipping'
+            )
             aligned_segments.append(aligned_seg)
             continue
 
@@ -253,7 +276,7 @@ def align(
 
         blank_id = 0
         for char, code in model_dictionary.items():
-            if char == '[pad]' or char == '<pad>':
+            if char in {"[pad]", "<pad>"}:
                 blank_id = code
 
         # Build tokens, mapping unknown chars to a wildcard column.
@@ -273,7 +296,9 @@ def align(
         path = backtrack(trellis, emission, tokens, blank_id)
 
         if path is None:
-            logger.warning(f'Failed to align segment ("{segment["text"]}"): backtrack failed, resorting to original')
+            logger.warning(
+                f'Failed to align segment ("{segment["text"]}"): backtrack failed, resorting to original'
+            )
             aligned_segments.append(aligned_seg)
             continue
 
@@ -305,9 +330,11 @@ def align(
 
             # Increment word_idx on space (nltk tokenization would be
             # more robust, but space-splitting suffices for now).
-            if model_lang in LANGUAGES_WITHOUT_SPACES:
-                word_idx += 1
-            elif cdx == len(text) - 1 or text[cdx+1] == " ":
+            if (
+                model_lang in LANGUAGES_WITHOUT_SPACES
+                or cdx == len(text) - 1
+                or text[cdx + 1] == " "
+            ):
                 word_idx += 1
 
         char_segments_arr = pd.DataFrame(char_segments_arr)
@@ -316,12 +343,17 @@ def align(
         # assign sentence_idx to each character index
         char_segments_arr["sentence-idx"] = None
         for sdx2, (sstart, send) in enumerate(segment_data[sdx]["sentence_spans"]):
-            curr_chars = char_segments_arr.loc[(char_segments_arr.index >= sstart) & (char_segments_arr.index <= send)]
-            char_segments_arr.loc[(char_segments_arr.index >= sstart) & (char_segments_arr.index <= send), "sentence-idx"] = sdx2
+            curr_chars = char_segments_arr.loc[
+                (char_segments_arr.index >= sstart) & (char_segments_arr.index <= send)
+            ]
+            char_segments_arr.loc[
+                (char_segments_arr.index >= sstart) & (char_segments_arr.index <= send),
+                "sentence-idx",
+            ] = sdx2
 
             sentence_text = text[sstart:send]
             sentence_start = curr_chars["start"].min()
-            end_chars = curr_chars[curr_chars["char"] != ' ']
+            end_chars = curr_chars[curr_chars["char"] != " "]
             sentence_end = end_chars["end"].max()
             sentence_words = []
 
@@ -377,12 +409,18 @@ def align(
                 curr_chars = curr_chars[["char", "start", "end", "score"]]
                 curr_chars.fillna(-1, inplace=True)
                 curr_chars = curr_chars.to_dict("records")
-                curr_chars = [{key: val for key, val in char.items() if val != -1} for char in curr_chars]
+                curr_chars = [
+                    {key: val for key, val in char.items() if val != -1} for char in curr_chars
+                ]
                 aligned_subsegments[-1]["chars"] = curr_chars
 
         aligned_subsegments = pd.DataFrame(aligned_subsegments)
-        aligned_subsegments["start"] = interpolate_nans(aligned_subsegments["start"], method=interpolate_method)
-        aligned_subsegments["end"] = interpolate_nans(aligned_subsegments["end"], method=interpolate_method)
+        aligned_subsegments["start"] = interpolate_nans(
+            aligned_subsegments["start"], method=interpolate_method
+        )
+        aligned_subsegments["end"] = interpolate_nans(
+            aligned_subsegments["end"], method=interpolate_method
+        )
         # concatenate sentences with same timestamps
         agg_dict = {"text": " ".join, "words": "sum"}
         if model_lang in LANGUAGES_WITHOUT_SPACES:
@@ -391,15 +429,17 @@ def align(
             agg_dict["chars"] = "sum"
         if avg_logprob is not None:
             agg_dict["avg_logprob"] = "first"
-        aligned_subsegments= aligned_subsegments.groupby(["start", "end"], as_index=False).agg(agg_dict)
-        aligned_subsegments = aligned_subsegments.to_dict('records')
+        aligned_subsegments = aligned_subsegments.groupby(["start", "end"], as_index=False).agg(
+            agg_dict
+        )
+        aligned_subsegments = aligned_subsegments.to_dict("records")
         if progress_callback is not None:
             progress_callback(((sdx + 1) / total_segments) * 100)
 
-        aligned_segments += aligned_subsegments
+        aligned_segments.extend(aligned_subsegments)  # pyrefly: ignore[bad-argument-type]
 
     # create word_segments list
-    word_segments: List[SingleWordSegment] = []
+    word_segments: list[SingleWordSegment] = []
     for segment in aligned_segments:
         word_segments += segment["words"]
 
@@ -487,6 +527,7 @@ class Segment:
     def length(self):
         return self.end - self.start
 
+
 def merge_repeats(path, transcript):
     i1, i2 = 0, 0
     segments = []
@@ -505,6 +546,7 @@ def merge_repeats(path, transcript):
         i1 = i2
     return segments
 
+
 def merge_words(segments, separator="|"):
     words = []
     i1, i2 = 0, 0
@@ -513,7 +555,9 @@ def merge_words(segments, separator="|"):
             if i1 != i2:
                 segs = segments[i1:i2]
                 word = "".join([seg.label for seg in segs])
-                score = sum(seg.score * seg.length for seg in segs) / sum(seg.length for seg in segs)
+                score = sum(seg.score * seg.length for seg in segs) / sum(
+                    seg.length for seg in segs
+                )
                 words.append(Segment(word, segments[i1].start, segments[i2 - 1].end, score))
             i1 = i2 + 1
             i2 = i1

@@ -23,9 +23,9 @@ Hamming window, then max over the 3 speaker classes for speech probability.
 import os
 from functools import lru_cache
 
-import mlx.core as mx
-import mlx.nn as nn
+import mlx.core as mx  # pyrefly: ignore[missing-import]
 import numpy as np
+from mlx import nn
 from safetensors import safe_open
 
 SAMPLE_RATE = 16000
@@ -50,13 +50,15 @@ def _leaky_relu(x, slope=0.01):
 @lru_cache(maxsize=1)
 def _load_weights():
     path = os.path.join(
-        os.path.dirname(__file__), "..", "assets",
+        os.path.dirname(__file__),
+        "..",
+        "assets",
         "pyannote_segmentation_mlx.safetensors",
     )
     path = os.path.abspath(path)
     weights = {}
     with safe_open(path, framework="np") as f:
-        for k in f.keys():
+        for k in f.keys():  # noqa: SIM118
             weights[k] = mx.array(f.get_tensor(k))
     return weights
 
@@ -87,19 +89,19 @@ def _instance_norm(x, weight, bias, eps=1e-5):
 
 
 def _maxpool1d(x, pool_size):
-    # x: (B, L, C). Max pool along L.
-    B, L, C = x.shape
-    new_L = L // pool_size
-    x = x[:, :new_L * pool_size, :]
+    # x: (B, L, C). Max pool along L. Names follow tensor-shape convention.
+    B, L, C = x.shape  # noqa: N806
+    new_L = L // pool_size  # noqa: N806
+    x = x[:, : new_L * pool_size, :]
     x = x.reshape(B, new_L, pool_size, C)
     return x.max(axis=2)
 
 
-def _lstm_layer(x, Wx, Wh, bias, reverse=False):
+def _lstm_layer(x, Wx, Wh, bias, reverse=False):  # noqa: N803
     # Single LSTM layer, single direction. x: (B, seq, input_dim).
     # Wx: (4*hidden, input). Wh: (4*hidden, hidden). bias: (4*hidden,).
     # Returns (B, seq, hidden).
-    B, seq_len, _ = x.shape
+    B, seq_len, _ = x.shape  # noqa: N806
     hidden = Wh.shape[1]
     h = mx.zeros((B, hidden))
     c = mx.zeros((B, hidden))
@@ -109,9 +111,9 @@ def _lstm_layer(x, Wx, Wh, bias, reverse=False):
         x_t = x[:, t, :]
         gates = x_t @ Wx.T + h @ Wh.T + bias
         i = _sigmoid(gates[:, 0:hidden])
-        f = _sigmoid(gates[:, hidden:2*hidden])
-        g = mx.tanh(gates[:, 2*hidden:3*hidden])
-        o = _sigmoid(gates[:, 3*hidden:4*hidden])
+        f = _sigmoid(gates[:, hidden : 2 * hidden])
+        g = mx.tanh(gates[:, 2 * hidden : 3 * hidden])
+        o = _sigmoid(gates[:, 3 * hidden : 4 * hidden])
         c = f * c + i * g
         h = o * mx.tanh(c)
         outputs.append(h)
@@ -123,8 +125,8 @@ def _lstm_layer(x, Wx, Wh, bias, reverse=False):
 def _bilstm(x, fwd_weights, bwd_weights):
     """4-layer bidirectional LSTM. Each layer: fwd + bwd -> concat (256)."""
     for li in range(4):
-        fwd_Wx, fwd_Wh, fwd_bias = fwd_weights[li]
-        bwd_Wx, bwd_Wh, bwd_bias = bwd_weights[li]
+        fwd_Wx, fwd_Wh, fwd_bias = fwd_weights[li]  # noqa: N806
+        bwd_Wx, bwd_Wh, bwd_bias = bwd_weights[li]  # noqa: N806
         fwd_out = _lstm_layer(x, fwd_Wx, fwd_Wh, fwd_bias, reverse=False)
         bwd_out = _lstm_layer(x, bwd_Wx, bwd_Wh, bwd_bias, reverse=True)
         x = mx.concatenate([fwd_out, bwd_out], axis=-1)
@@ -142,46 +144,47 @@ def _segmentation_forward(audio_chunk, weights):
 
     # SincNet wav_norm (InstanceNorm on raw waveform, 1 channel).
     x = audio_chunk[:, :, None]  # (B, L, 1)
-    x = _instance_norm(x, weights["sincnet.wav_norm.weight"],
-                       weights["sincnet.wav_norm.bias"])
+    x = _instance_norm(x, weights["sincnet.wav_norm.weight"], weights["sincnet.wav_norm.bias"])
 
     # SincNet: conv -> abs(c==0) -> pool -> norm -> leaky_relu, per layer.
     # Layer 0: 80 sinc filters, kernel 251, stride 10.
-    x = _conv1d(x, weights["sincnet.conv.0.weight"],
-                mx.zeros((80,)), stride=10, padding=0)
+    x = _conv1d(x, weights["sincnet.conv.0.weight"], mx.zeros((80,)), stride=10, padding=0)
     x = mx.abs(x)
     x = _maxpool1d(x, pool_size=3)
-    x = _instance_norm(x, weights["sincnet.norm.0.weight"],
-                       weights["sincnet.norm.0.bias"])
+    x = _instance_norm(x, weights["sincnet.norm.0.weight"], weights["sincnet.norm.0.bias"])
     x = _leaky_relu(x)
 
     # Layer 1: 60 filters, kernel 5, stride 1, no padding.
-    x = _conv1d(x, weights["sincnet.conv.1.weight"],
-                weights["sincnet.conv.1.bias"], stride=1, padding=0)
+    x = _conv1d(
+        x, weights["sincnet.conv.1.weight"], weights["sincnet.conv.1.bias"], stride=1, padding=0
+    )
     x = _maxpool1d(x, pool_size=3)
-    x = _instance_norm(x, weights["sincnet.norm.1.weight"],
-                       weights["sincnet.norm.1.bias"])
+    x = _instance_norm(x, weights["sincnet.norm.1.weight"], weights["sincnet.norm.1.bias"])
     x = _leaky_relu(x)
 
     # Layer 2: 60 filters, kernel 5, stride 1, no padding.
-    x = _conv1d(x, weights["sincnet.conv.2.weight"],
-                weights["sincnet.conv.2.bias"], stride=1, padding=0)
+    x = _conv1d(
+        x, weights["sincnet.conv.2.weight"], weights["sincnet.conv.2.bias"], stride=1, padding=0
+    )
     x = _maxpool1d(x, pool_size=3)
-    x = _instance_norm(x, weights["sincnet.norm.2.weight"],
-                       weights["sincnet.norm.2.bias"])
+    x = _instance_norm(x, weights["sincnet.norm.2.weight"], weights["sincnet.norm.2.bias"])
     x = _leaky_relu(x)
 
     # x: (B, 293, 60). BiLSTM 4 layers, bidirectional.
     fwd_weights = [
-        (weights[f"lstm_fwd.layers.{i}.Wx"],
-         weights[f"lstm_fwd.layers.{i}.Wh"],
-         weights[f"lstm_fwd.layers.{i}.bias"])
+        (
+            weights[f"lstm_fwd.layers.{i}.Wx"],
+            weights[f"lstm_fwd.layers.{i}.Wh"],
+            weights[f"lstm_fwd.layers.{i}.bias"],
+        )
         for i in range(4)
     ]
     bwd_weights = [
-        (weights[f"lstm_bwd.layers.{i}.Wx"],
-         weights[f"lstm_bwd.layers.{i}.Wh"],
-         weights[f"lstm_bwd.layers.{i}.bias"])
+        (
+            weights[f"lstm_bwd.layers.{i}.Wx"],
+            weights[f"lstm_bwd.layers.{i}.Wh"],
+            weights[f"lstm_bwd.layers.{i}.bias"],
+        )
         for i in range(4)
     ]
     x = _bilstm(x, fwd_weights, bwd_weights)  # (B, 293, 256)
@@ -207,7 +210,7 @@ def _aggregate_overlap(chunk_scores, num_total_frames):
     out = np.zeros((num_total_frames, 3), dtype=np.float32)
     norm = np.zeros((num_total_frames, 1), dtype=np.float32)
     for i, scores in enumerate(chunk_scores):
-        start = int(round(i * CHUNK_STEP_RATIO * NUM_FRAMES_PER_CHUNK))
+        start = round(i * CHUNK_STEP_RATIO * NUM_FRAMES_PER_CHUNK)
         end = min(start + NUM_FRAMES_PER_CHUNK, num_total_frames)
         length = end - start
         out[start:end] += scores[:length] * hamming[:length]
@@ -246,20 +249,16 @@ def segment_audio(audio):
 
     chunk_scores = []
     for start in chunk_starts:
-        chunk = audio[:, start:start + CHUNK_SAMPLES]
+        chunk = audio[:, start : start + CHUNK_SAMPLES]
         probs = _segmentation_forward(chunk, weights)  # (1, 293, 3)
         chunk_scores.append(np.array(probs[0]))
 
     # Overlap-add aggregation across 5s windows with 0.5s step.
-    num_chunks = len(chunk_scores)
-    num_total_frames = int(round(
-        chunk_starts[-1] / SAMPLE_RATE / FRAME_STEP
-    )) + NUM_FRAMES_PER_CHUNK
+    len(chunk_scores)
+    num_total_frames = round(chunk_starts[-1] / SAMPLE_RATE / FRAME_STEP) + NUM_FRAMES_PER_CHUNK
     agg = _aggregate_overlap(chunk_scores, num_total_frames)
 
     # VAD speech probability = max over speaker classes.
     scores = agg.max(axis=-1)
-    frame_times = mx.array(
-        [i * FRAME_STEP + FRAME_DURATION / 2 for i in range(scores.shape[0])]
-    )
+    frame_times = mx.array([i * FRAME_STEP + FRAME_DURATION / 2 for i in range(scores.shape[0])])
     return mx.array(scores)[:, None], frame_times

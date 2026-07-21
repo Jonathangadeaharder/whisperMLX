@@ -169,3 +169,10 @@ cython_debug/
 
 # PyPI configuration file
 .pypirc
+mutants/
+.mutmut-cache
+.sonar/
+.scannerwork/
+ruff.json
+test-results.xml
+show-check

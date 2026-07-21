@@ -1,10 +1,11 @@
 """Test that align() produces word-level timestamps for unalignable characters."""
 
+from typing import ClassVar
+from unittest.mock import MagicMock
+
 import numpy as np
 import pandas as pd
 import torch
-from unittest.mock import MagicMock
-
 from whisperx.alignment import align
 from whisperx.utils import interpolate_nans
 
@@ -38,11 +39,10 @@ def _make_emission(num_frames, dictionary, transcript_chars, blank_id=0):
     emission[:, blank_id] = -1.0
 
     # Assign each transcript char a span of frames
-    chars_in_dict = [(i, c) for i, c in enumerate(transcript_chars)
-                     if c.lower() in dictionary]
+    chars_in_dict = [(i, c) for i, c in enumerate(transcript_chars) if c.lower() in dictionary]
     if chars_in_dict:
         frames_per_char = num_frames // (len(transcript_chars) + 1)
-        for seq_idx, (char_idx, char) in enumerate(chars_in_dict):
+        for _seq_idx, (char_idx, char) in enumerate(chars_in_dict):
             center = (char_idx + 1) * frames_per_char
             start = max(0, center - frames_per_char // 2)
             end = min(num_frames, center + frames_per_char // 2)
@@ -57,15 +57,31 @@ def _make_emission(num_frames, dictionary, transcript_chars, blank_id=0):
 class TestAlignWithWildcards:
     """Test align() end-to-end with unknown characters."""
 
-    DICTIONARY = {
+    DICTIONARY: ClassVar[dict] = {
         "<pad>": 0,  # blank
-        "a": 1, "b": 2, "c": 3, "d": 4, "e": 5,
-        "f": 6, "g": 7, "h": 8, "i": 9, "k": 10,
-        "l": 11, "m": 12, "n": 13, "o": 14, "p": 15,
-        "r": 16, "s": 17, "t": 18, "u": 19, "w": 20,
+        "a": 1,
+        "b": 2,
+        "c": 3,
+        "d": 4,
+        "e": 5,
+        "f": 6,
+        "g": 7,
+        "h": 8,
+        "i": 9,
+        "k": 10,
+        "l": 11,
+        "m": 12,
+        "n": 13,
+        "o": 14,
+        "p": 15,
+        "r": 16,
+        "s": 17,
+        "t": 18,
+        "u": 19,
+        "w": 20,
         "|": 21,
     }
-    METADATA = {"language": "en", "dictionary": DICTIONARY, "type": "torchaudio"}
+    METADATA: ClassVar[dict] = {"language": "en", "dictionary": DICTIONARY, "type": "torchaudio"}
 
     def _run_align(self, text, duration=5.0, num_frames=100, interpolate_method="nearest"):
         """Run align() with a mock model on a single segment."""
@@ -78,7 +94,7 @@ class TestAlignWithWildcards:
         audio = torch.randn(num_samples)
 
         transcript = [{"text": text, "start": 0.0, "end": duration}]
-        result = align(
+        return align(
             transcript=transcript,
             model=model,
             align_model_metadata=self.METADATA,
@@ -86,7 +102,6 @@ class TestAlignWithWildcards:
             device="cpu",
             interpolate_method=interpolate_method,
         )
-        return result
 
     def test_known_chars_get_timestamps(self):
         """Baseline: words with all known chars get timestamps."""
@@ -137,9 +152,7 @@ class TestAlignWithWildcards:
         result = self._run_align("the 99 cats")
         starts = [w["start"] for w in result["word_segments"] if "start" in w]
         for i in range(1, len(starts)):
-            assert starts[i] >= starts[i - 1], (
-                f"Timestamps not ordered: {starts}"
-            )
+            assert starts[i] >= starts[i - 1], f"Timestamps not ordered: {starts}"
 
     def test_issue_1372_digits_comma_no_timestamps(self):
         """Regression: '4,9' (digits+comma) must get timestamps.
