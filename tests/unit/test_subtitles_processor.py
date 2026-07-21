@@ -1065,3 +1065,219 @@ class TestSplitPointsMutationKillers:
         proc = SubtitlesProcessor([seg], "en", max_line_length=100, min_char_length_splitter=4)
         sp = proc.determine_advanced_split_points(seg)
         assert 1 in sp
+
+
+class TestGenerateSubtitlesBoundaryKillers:
+    """Kill boundary mutants in generate_subtitles_from_split_points."""
+
+    def test_gap_exactly_0p8_extends_end(self):
+        # (next_start - end_time) <= 0.8: boundary at exactly 0.8.
+        # correct: 0.8 <= 0.8 True -> extend. mutant (<): 0.8 < 0.8 False.
+        words = [
+            {"word": "hello", "start": 0.0, "end": 0.5, "score": 1.0},
+            {"word": "world", "start": 0.5, "end": 1.0, "score": 1.0},
+        ]
+        seg = {"start": 0.0, "end": 1.0, "text": "hello world", "words": words}
+        proc = SubtitlesProcessor([seg], "en", max_line_length=100)
+        # end=1.0, next_start=1.8, gap=0.8 -> extend to 1.8.
+        subs = proc.generate_subtitles_from_split_points(seg, [], next_start_time=1.8)
+        assert subs[0]["end"] == 1.8
+
+    def test_dict_fragment_gap_exactly_0p8_extends(self):
+        # Same boundary for the dict-fragment branch (line 201).
+        # split_point word end + next word start gap exactly 0.8 -> extend.
+        words = [
+            {"word": "hello", "start": 0.0, "end": 0.5, "score": 1.0},
+            {"word": "world", "start": 1.3, "end": 1.8, "score": 1.0},
+        ]
+        seg = {"start": 0.0, "end": 2.0, "text": "hello world", "words": words}
+        proc = SubtitlesProcessor([seg], "en", max_line_length=100)
+        # split at 0: fragment [hello] end=0.5, next word start=1.3, gap=0.8.
+        subs = proc.generate_subtitles_from_split_points(seg, [0])
+        # correct: 0.8 <= 0.8 -> end=1.3. mutant (<): end stays 0.5.
+        assert subs[0]["end"] == 1.3
+
+    def test_dict_fragment_gap_just_over_0p8_no_extend(self):
+        # Gap > 0.8 -> no extend. Kills <= -> < mutant from the other side.
+        words = [
+            {"word": "hello", "start": 0.0, "end": 0.5, "score": 1.0},
+            {"word": "world", "start": 1.31, "end": 1.8, "score": 1.0},
+        ]
+        seg = {"start": 0.0, "end": 2.0, "text": "hello world", "words": words}
+        proc = SubtitlesProcessor([seg], "en", max_line_length=100)
+        subs = proc.generate_subtitles_from_split_points(seg, [0])
+        # gap=0.81 > 0.8 -> end stays 0.5.
+        assert subs[0]["end"] == 0.5
+
+
+class TestSaveFormatKillers:
+    """Kill mutants in save() format and structure."""
+
+    def test_save_vtt_writes_webvtt_header(self, tmp_path):
+        # is_vtt -> "WEBVTT\n\n" header. Mutant: no header or different text.
+        seg = {
+            "start": 0.0,
+            "end": 1.0,
+            "text": "hello world",
+            "words": [{"word": "hello", "start": 0.0, "end": 0.5, "score": 1.0}],
+        }
+        out_path = tmp_path / "sub.vtt"
+        proc = SubtitlesProcessor([seg], "en", max_line_length=100, is_vtt=True)
+        proc.save(str(out_path), advanced_splitting=True)
+        text = out_path.read_text(encoding="utf-8")
+        assert text.startswith("WEBVTT\n\n")
+
+    def test_save_srt_no_webvtt_header(self, tmp_path):
+        # SRT (is_vtt=False) must NOT write WEBVTT header.
+        seg = {
+            "start": 0.0,
+            "end": 1.0,
+            "text": "hello world",
+            "words": [{"word": "hello", "start": 0.0, "end": 0.5, "score": 1.0}],
+        }
+        out_path = tmp_path / "sub.srt"
+        proc = SubtitlesProcessor([seg], "en", max_line_length=100, is_vtt=False)
+        proc.save(str(out_path), advanced_splitting=True)
+        text = out_path.read_text(encoding="utf-8")
+        assert "WEBVTT" not in text
+
+    def test_save_writes_cue_index(self, tmp_path):
+        # write_subtitle writes idx, then "start --> end", then text.
+        # Mutant: idx off-by-one or missing. Verify "1\n" prefix.
+        seg = {
+            "start": 0.0,
+            "end": 1.0,
+            "text": "hello world",
+            "words": [{"word": "hello", "start": 0.0, "end": 0.5, "score": 1.0}],
+        }
+        out_path = tmp_path / "sub.srt"
+        proc = SubtitlesProcessor([seg], "en", max_line_length=100)
+        proc.save(str(out_path), advanced_splitting=True)
+        text = out_path.read_text(encoding="utf-8")
+        assert text.startswith("1\n")
+
+    def test_save_uses_dot_for_vtt_comma_for_srt(self, tmp_path):
+        # format_timestamp(is_vtt): VTT dot, SRT comma. Mutant flips separator.
+        seg = {
+            "start": 0.0,
+            "end": 1.5,
+            "text": "hello world",
+            "words": [{"word": "hello", "start": 0.0, "end": 1.5, "score": 1.0}],
+        }
+        # SRT
+        srt_path = tmp_path / "sub.srt"
+        SubtitlesProcessor([seg], "en", max_line_length=100, is_vtt=False).save(
+            str(srt_path), advanced_splitting=True
+        )
+        srt_text = srt_path.read_text(encoding="utf-8")
+        assert "," in srt_text
+        assert ".000" not in srt_text.split("\n")[1]
+        # VTT
+        vtt_path = tmp_path / "sub.vtt"
+        SubtitlesProcessor([seg], "en", max_line_length=100, is_vtt=True).save(
+            str(vtt_path), advanced_splitting=True
+        )
+        vtt_text = vtt_path.read_text(encoding="utf-8")
+        assert "." in vtt_text
+
+    def test_save_returns_subtitle_count(self, tmp_path):
+        # return len(subtitles). Mutant: returns 0 or wrong count.
+        seg = {
+            "start": 0.0,
+            "end": 2.0,
+            "text": "hello world foo bar",
+            "words": [
+                {"word": "hello", "start": 0.0, "end": 0.5, "score": 1.0},
+                {"word": "world", "start": 0.5, "end": 1.0, "score": 1.0},
+                {"word": "foo", "start": 1.0, "end": 1.5, "score": 1.0},
+                {"word": "bar", "start": 1.5, "end": 2.0, "score": 1.0},
+            ],
+        }
+        out_path = tmp_path / "sub.srt"
+        # max_line_length=10 + min_char_length_splitter=4 forces splits.
+        proc = SubtitlesProcessor([seg], "en", max_line_length=10, min_char_length_splitter=4)
+        count = proc.save(str(out_path), advanced_splitting=True)
+        text = out_path.read_text(encoding="utf-8")
+        cue_count = text.count("-->")
+        assert count == cue_count
+        assert count > 1
+
+    def test_save_strips_subtitle_text(self, tmp_path):
+        # text = subtitle["text"].strip(). Mutant: no strip.
+        seg = {
+            "start": 0.0,
+            "end": 1.0,
+            "text": "  hello  ",
+            "words": [{"word": "hello", "start": 0.0, "end": 1.0, "score": 1.0}],
+        }
+        out_path = tmp_path / "sub.srt"
+        proc = SubtitlesProcessor([seg], "en", max_line_length=100)
+        proc.save(str(out_path), advanced_splitting=True)
+        text = out_path.read_text(encoding="utf-8")
+        # Stripped: no leading/trailing spaces in the text line.
+        lines = text.split("\n")
+        # Line 0 = idx, line 1 = timestamps, line 2 = text.
+        assert lines[2] == "hello"
+
+
+class TestProcessSegmentsKillers:
+    """Kill mutants in process_segments branching."""
+
+    def test_process_segments_advanced_passes_next_start(self):
+        # advanced_splitting=True: determine_advanced_split_points receives
+        # next_segment_start_time. Mutant: passes None or wrong value.
+        seg1 = {
+            "start": 0.0,
+            "end": 2.0,
+            "text": "hello world foo bar",
+            "words": [
+                {"word": "hello", "start": 0.0, "end": 0.5, "score": 1.0},
+                {"word": "world", "start": 0.5, "end": 1.0, "score": 1.0},
+                {"word": "foo", "start": 1.0, "end": 1.5, "score": 1.0},
+                {"word": "bar", "start": 1.5, "end": 2.0, "score": 1.0},
+            ],
+        }
+        seg2 = {
+            "start": 3.0,
+            "end": 4.0,
+            "text": "baz",
+            "words": [{"word": "baz", "start": 3.0, "end": 4.0, "score": 1.0}],
+        }
+        proc = SubtitlesProcessor([seg1, seg2], "en", max_line_length=10)
+        proc.process_segments(advanced_splitting=True)
+        # seg1 last fragment end=2.0, next_start=3.0, gap=1.0 > 0.8 -> no extend.
+        # If next_start was None (mutant), end stays 2.0 anyway. Need a case
+        # where the gap <= 0.8 to distinguish. Use seg2 start=2.5 (gap=0.5).
+        seg2_close = {
+            "start": 2.5,
+            "end": 3.5,
+            "text": "baz",
+            "words": [{"word": "baz", "start": 2.5, "end": 3.5, "score": 1.0}],
+        }
+        proc2 = SubtitlesProcessor([seg1, seg2_close], "en", max_line_length=10)
+        subs2 = proc2.process_segments(advanced_splitting=True)
+        # seg1 last fragment: end=2.0, next_start=2.5, gap=0.5 <= 0.8 -> extend.
+        # Mutant (None): no extend, end stays 2.0.
+        last_seg1_end = max(s["end"] for s in subs2 if s["start"] < 2.5)
+        assert last_seg1_end == 2.5
+
+    def test_process_segments_non_advanced_estimates_timestamps(self):
+        # advanced_splitting=False: estimate_timestamp_for_word called for
+        # words missing start/end. Mutant: skips estimation.
+        seg = {
+            "start": 0.0,
+            "end": 2.0,
+            "text": "hello world",
+            "words": [
+                {"word": "hello", "start": 0.0, "end": 1.0, "score": 1.0},
+                {"word": "world"},  # missing start/end
+            ],
+        }
+        proc = SubtitlesProcessor([seg], "en", max_line_length=100)
+        subs = proc.process_segments(advanced_splitting=False)
+        # correct: "world" gets start/end estimated. Mutant: still missing.
+        # process_segments returns segment-level subtitle, but the words list
+        # in the segment is mutated in place. Verify the word now has start.
+        assert "start" in seg["words"][1]
+        assert "end" in seg["words"][1]
+        assert len(subs) == 1
