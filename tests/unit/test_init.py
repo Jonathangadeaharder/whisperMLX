@@ -7,9 +7,25 @@ the public package API, mocking the underlying modules to avoid runtime costs.
 
 from __future__ import annotations
 
+import sys
 from unittest.mock import MagicMock, patch
 
+import pytest
+
 import whisperx
+
+
+@pytest.mark.skipif(
+    sys.platform != "darwin",
+    reason="whisperx.asr -> whisperx.vads -> mlx.core",
+)
+class TestLazyImportsAsr:
+    def test_load_model_delegates(self):
+        with patch("whisperx.asr.load_model") as fn:
+            fn.return_value = "pipeline"
+            out = whisperx.load_model("small", "cpu")
+        fn.assert_called_once_with("small", "cpu")
+        assert out == "pipeline"
 
 
 class TestLazyImports:
@@ -26,13 +42,6 @@ class TestLazyImports:
             out = whisperx.align([], MagicMock(), {}, MagicMock(), "cpu")
         fn.assert_called_once()
         assert "segments" in out
-
-    def test_load_model_delegates(self):
-        with patch("whisperx.asr.load_model") as fn:
-            fn.return_value = "pipeline"
-            out = whisperx.load_model("small", "cpu")
-        fn.assert_called_once_with("small", "cpu")
-        assert out == "pipeline"
 
     def test_load_audio_delegates(self):
         with patch("whisperx.audio.load_audio") as fn:

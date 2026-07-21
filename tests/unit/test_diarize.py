@@ -659,6 +659,10 @@ class TestIntervalTreeRealData:
         assert tree.query(0.0, 1.0) == []
 
 
+@pytest.mark.skipif(
+    sys.platform != "darwin",
+    reason="_binarize_segments imports whisperx.vads.pyannote -> mlx.core",
+)
 class TestBinarizeSegmentsReal:
     def test_binarize_with_real_speech_scores(self):
         # Drive _binarize_segments with a real score array that crosses onset.
