@@ -36,7 +36,7 @@ jobs:
         run: uv run pytest tests/ -m "not e2e" --cov=whisperx --cov-branch --cov-report=xml:coverage.xml --cov-report=term --junitxml=test-results.xml
 
       - name: SonarCloud Scan
-        uses: SonarSource/sonarcloud-github-action@eb2117251f9ca0497dd5a7265016a424b9296c9c # v5.0.0
+        uses: SonarSource/sonarcloud-github-action@ffc3010689be73b8e5ae0c57ce35968afd7909e8 # v5.0.0
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
