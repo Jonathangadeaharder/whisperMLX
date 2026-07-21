@@ -66,11 +66,33 @@ jobs:
       - name: Install project (dev extras)
         run: uv sync --all-extras
       - name: Pytest (unit + integration, no e2e/slow)
+        # Linux coverage is ~50% because mlx-dependent modules are skipped
+        # via collect_ignore_glob in conftest.py (libmlx.so is Apple Silicon
+        # only). The >90% gate is enforced by the darwin `coverage` job below.
         run: uv run pytest tests/ -m "not e2e and not slow" --cov=whisperx --cov-branch --cov-report=term --cov-report=xml:coverage.xml
+
+  coverage:
+    # Enforces >90% line+branch coverage on the full test suite. Must run on
+    # macOS because mlx.core (libmlx.so) is Apple Silicon only; Linux skips
+    # mlx-dependent modules via collect_ignore_glob in conftest.py.
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+      - name: Install uv
+        uses: astral-sh/setup-uv@d4b2f3b6ecc6e67c4457f6d3e41ec42d3d0fcb86 # v5.4.2
+        with:
+          version: "0.11.6"
+          python-version: "3.12"
+      - name: Install project (dev extras)
+        run: uv sync --all-extras
+      - name: Pytest (full coverage gate, >90% line+branch)
+        run: uv run pytest tests/ -m "not e2e and not slow" --cov=whisperx --cov-branch --cov-report=term --cov-fail-under=90
 
   build:
     runs-on: ubuntu-latest
-    needs: [lint, typecheck, test]
+    needs: [lint, typecheck, test, coverage]
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
