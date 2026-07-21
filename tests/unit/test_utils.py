@@ -1457,3 +1457,242 @@ class TestIterateResultMutationKillers:
         # line_len after "a"=1. "b" has_room. correct: 1>0 True -> 1 cue.
         # mutant: 1>1 False -> line break -> subtitle break -> 2 cues.
         assert out.count("-->") == 1
+
+
+class TestIterateResultHighlightKillers:
+    """Kill mutants in the highlight_words branch and subtitle assembly."""
+
+    def _write(self, tmp_path, words, seg_start, seg_end, opts, speaker=None):
+        from whisperx.utils import WriteSRT
+
+        seg = {"start": seg_start, "end": seg_end, "text": "x", "words": words}
+        if speaker is not None:
+            seg["speaker"] = speaker
+        result = {"language": "en", "segments": [seg]}
+        w = WriteSRT(str(tmp_path))
+        w(result, "audio.wav", opts)
+        return _read(tmp_path / "audio.srt")
+
+    def test_highlight_emits_inter_word_gap_cue(self, tmp_path):
+        # mutmut_192: if last != start -> == . With a gap between words,
+        # correct: last != start yields gap cue. mutant: == skips gap cue.
+        words = [
+            {"word": "alpha", "start": 1.0, "end": 1.5, "score": 1.0},
+            {"word": "beta", "start": 3.0, "end": 3.5, "score": 1.0},
+        ]
+        opts = {**_SUB_OPTIONS, "highlight_words": True}
+        out = self._write(tmp_path, words, 0.0, 4.0, opts)
+        # Gap cue spans 00:01,500 -> 00:03,000. Correct: 2 word cues + 1 gap.
+        assert "00:00:01,500 --> 00:00:03,000" in out
+
+    def test_highlight_last_updated_to_end(self, tmp_path):
+        # mutmut_208: last = end -> None. After first word, last should be
+        # its end so the next gap cue starts there. If last=None, gap cue
+        # would start from subtitle_start (00:00,000).
+        words = [
+            {"word": "alpha", "start": 1.0, "end": 2.0, "score": 1.0},
+            {"word": "beta", "start": 3.0, "end": 4.0, "score": 1.0},
+        ]
+        opts = {**_SUB_OPTIONS, "highlight_words": True}
+        out = self._write(tmp_path, words, 0.0, 5.0, opts)
+        # Gap cue must start at 00:02,000 (alpha end), not 00:00,000.
+        assert "00:00:02,000 --> 00:00:03,000" in out
+        assert "00:00:00,000 --> 00:00:03,000" not in out
+
+    def test_highlight_start_and_end_from_word(self, tmp_path):
+        # mutmut_184/188: start/end = format_timestamp(...) -> None.
+        # If start=None, the cue line would be "None --> 00:01,500".
+        words = [{"word": "alpha", "start": 1.0, "end": 1.5, "score": 1.0}]
+        opts = {**_SUB_OPTIONS, "highlight_words": True}
+        out = self._write(tmp_path, words, 0.0, 2.0, opts)
+        assert "00:00:01,000 --> 00:00:01,500" in out
+
+    def test_highlight_underlines_only_current_word(self, tmp_path):
+        # mutmut_206: if j == i -> != i. Correct: only word i gets <u>.
+        # mutant: all words except i get <u>.
+        words = [
+            {"word": "alpha", "start": 0.0, "end": 0.5, "score": 1.0},
+            {"word": "beta", "start": 0.5, "end": 1.0, "score": 1.0},
+        ]
+        opts = {**_SUB_OPTIONS, "highlight_words": True}
+        out = self._write(tmp_path, words, 0.0, 1.0, opts)
+        # First word cue underlines alpha only, not beta.
+        lines = out.split("\n")
+        alpha_cue = next((ln for ln in lines if "<u>alpha</u>" in ln and "beta" in ln), None)
+        assert alpha_cue is not None
+        assert "<u>beta</u>" not in alpha_cue
+
+    def test_highlight_substitution_pattern(self, tmp_path):
+        # mutmut_204: re.sub pattern r"\1<u>\2</u>" -> mutated. Correct wraps
+        # word in <u>...</u>. Assert the exact markup appears.
+        words = [{"word": "alpha", "start": 0.0, "end": 0.5, "score": 1.0}]
+        opts = {**_SUB_OPTIONS, "highlight_words": True}
+        out = self._write(tmp_path, words, 0.0, 1.0, opts)
+        assert "<u>alpha</u>" in out
+
+    def test_highlight_join_with_spaces(self, tmp_path):
+        # mutmut_196: " ".join(...) -> "XX XX".join. Correct joins with space.
+        # In highlight mode the first word is wrapped in <u>, so assert the
+        # second word follows with a single space separator (not "XX XX").
+        words = [
+            {"word": "alpha", "start": 0.0, "end": 0.5, "score": 1.0},
+            {"word": "beta", "start": 0.5, "end": 1.0, "score": 1.0},
+        ]
+        opts = {**_SUB_OPTIONS, "highlight_words": True}
+        out = self._write(tmp_path, words, 0.0, 1.0, opts)
+        assert "<u>alpha</u> beta" in out
+        assert "XX" not in out
+
+    def test_subtitle_text_join_with_spaces(self, tmp_path):
+        # mutmut_163: " ".join -> "XX XX".join (non-highlight path).
+        words = [
+            {"word": "alpha", "start": 0.0, "end": 0.5, "score": 1.0},
+            {"word": "beta", "start": 0.5, "end": 1.0, "score": 1.0},
+        ]
+        opts = {**_SUB_OPTIONS, "max_line_width": 100}
+        out = self._write(tmp_path, words, 0.0, 1.0, opts)
+        assert "alpha beta" in out
+
+    def test_speaker_prefix_empty_when_no_speaker(self, tmp_path):
+        # mutmut_172: prefix = "" -> "XXXX". Correct: no prefix without speaker.
+        words = [{"word": "alpha", "start": 0.0, "end": 0.5, "score": 1.0}]
+        opts = {**_SUB_OPTIONS, "max_line_width": 100}
+        out = self._write(tmp_path, words, 0.0, 1.0, opts, speaker=None)
+        # No [SPEAKER]: prefix should appear.
+        assert "[" not in out
+
+    def test_speaker_prefix_set_when_speaker_present(self, tmp_path):
+        # Verify prefix is built from speaker name when present.
+        words = [{"word": "alpha", "start": 0.0, "end": 0.5, "score": 1.0}]
+        opts = {**_SUB_OPTIONS, "max_line_width": 100}
+        out = self._write(tmp_path, words, 0.0, 1.0, opts, speaker="SPEAKER_00")
+        assert "[SPEAKER_00]:" in out
+
+    def test_word_starts_and_ends_both_required(self, tmp_path):
+        # mutmut_138: if word_starts and word_ends -> or. With only starts
+        # (no ends), correct falls back to segment times; mutant uses word start.
+        words = [{"word": "alpha", "start": 1.0}]  # no "end"
+        opts = {**_SUB_OPTIONS, "max_line_width": 100}
+        out = self._write(tmp_path, words, 5.0, 9.0, opts)
+        # Correct: word_ends empty -> fallback to segment times 00:05,000.
+        assert "00:00:05,000 --> 00:00:09,000" in out
+
+    def test_fallback_uses_first_segment_times(self, tmp_path):
+        # mutmut_147/151: times[0][0]/[1] -> times[1][...]. With one subtitle,
+        # times[1] would IndexError. Correct uses times[0].
+        words = [{"word": "alpha", "start": 1.0}]  # no end -> fallback path
+        opts = {**_SUB_OPTIONS, "max_line_width": 100}
+        out = self._write(tmp_path, words, 5.0, 9.0, opts)
+        assert "00:05,000" in out or "00:00:05,000" in out
+
+    def test_final_subtitle_yielded_when_nonempty(self, tmp_path):
+        # mutmut_115: if len(subtitle) > 0 -> >= 0. Empty case never reached
+        # here (words present). Verify subtitle is emitted.
+        words = [{"word": "alpha", "start": 0.0, "end": 0.5, "score": 1.0}]
+        opts = {**_SUB_OPTIONS, "max_line_width": 100}
+        out = self._write(tmp_path, words, 0.0, 1.0, opts)
+        assert "alpha" in out
+        assert out.count("-->") == 1
+
+    def test_long_pause_false_mutant_killer(self, tmp_path):
+        # mutmut_49: long_pause = False -> None. None is falsy like False, so
+        # behavior is identical. This mutant is equivalent. Skip (no test).
+        # Kept here as documentation of analysis.
+        pass
+
+
+class TestWriterFlushKillers:
+    """Kill flush=True mutants in WriteTXT/WriteVTT/WriteSRT/WriteTSV/Audacity.
+
+    The writers call print(..., flush=True). Mutants change flush to
+    False/None. The file is closed by the `with` block, so output content is
+    identical either way. Kill by passing a flush-tracking file object that
+    records whether flush was invoked per print call.
+    """
+
+    def _flush_tracker(self):
+        from io import StringIO
+
+        class FlushStringIO(StringIO):
+            def __init__(self):
+                super().__init__()
+                self.flush_count = 0
+
+            def flush(self):
+                self.flush_count += 1
+                super().flush()
+
+        return FlushStringIO()
+
+    def test_write_txt_flushes_per_segment(self):
+        # WriteTXT calls flush=True on every print. With 2 segments, flush
+        # is called at least twice. Mutant (flush=False): zero flush calls.
+        from whisperx.utils import WriteTXT
+
+        result = {
+            "language": "en",
+            "segments": [
+                {"start": 0.0, "end": 1.0, "text": "a"},
+                {"start": 1.0, "end": 2.0, "text": "b"},
+            ],
+        }
+        buf = self._flush_tracker()
+        w = WriteTXT(output_dir=".")
+        w.write_result(result, buf, {})
+        assert buf.flush_count >= 2
+
+    def test_write_srt_flushes_per_cue(self):
+        from whisperx.utils import WriteSRT
+
+        result = {
+            "language": "en",
+            "segments": [{"start": 0.0, "end": 1.0, "text": "hello"}],
+        }
+        buf = self._flush_tracker()
+        w = WriteSRT(output_dir=".")
+        w.write_result(result, buf, _SUB_OPTIONS)
+        assert buf.flush_count >= 1
+
+    def test_write_vtt_flushes_per_cue(self):
+        from whisperx.utils import WriteVTT
+
+        result = {
+            "language": "en",
+            "segments": [{"start": 0.0, "end": 1.0, "text": "hello"}],
+        }
+        buf = self._flush_tracker()
+        w = WriteVTT(output_dir=".")
+        w.write_result(result, buf, _SUB_OPTIONS)
+        # Only cue prints have flush=True (header does not). 1 cue = 1 flush.
+        assert buf.flush_count >= 1
+
+    def test_write_tsv_flushes_per_row(self):
+        from whisperx.utils import WriteTSV
+
+        result = {
+            "language": "en",
+            "segments": [
+                {"start": 0.0, "end": 1.0, "text": "a"},
+                {"start": 1.0, "end": 2.0, "text": "b"},
+            ],
+        }
+        buf = self._flush_tracker()
+        w = WriteTSV(output_dir=".")
+        w.write_result(result, buf, {})
+        # Only the final print per row has flush=True. 2 rows = 2 flushes.
+        assert buf.flush_count >= 2
+
+    def test_write_audacity_flushes_per_row(self):
+        from whisperx.utils import WriteAudacity
+
+        result = {
+            "language": "en",
+            "segments": [
+                {"start": 0.0, "end": 1.0, "text": "a"},
+                {"start": 1.0, "end": 2.0, "text": "b"},
+            ],
+        }
+        buf = self._flush_tracker()
+        w = WriteAudacity(output_dir=".")
+        w.write_result(result, buf, {})
+        assert buf.flush_count >= 2

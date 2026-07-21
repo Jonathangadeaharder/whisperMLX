@@ -850,3 +850,172 @@ class TestAssignWordSpeakersMissingKeys:
         # Correct: word_end=0.5 (word_start). query(0.5, 0.5) empty,
         # fill_nearest finds SPEAKER_00 at 0.5.
         assert out["segments"][0]["words"][0]["speaker"] == "SPEAKER_00"  # pyrefly: ignore[bad-typed-dict-key]
+
+
+class TestAssignWordSpeakersMathKillers:
+    """Kill math mutants in seg_mid and word_mid calculations.
+
+    seg_mid = (seg_start + seg_end) / 2. Mutants: *2, -, /3. To kill, set up
+    a fill_nearest scenario with two speakers where the midpoint selects one.
+    A math mutant shifts the midpoint, selecting the other speaker.
+    """
+
+    def _df(self, rows):
+        return pd.DataFrame(
+            [
+                {
+                    "segment": Segment(s, e, spk),
+                    "label": int(spk.split("_")[1]) if spk and "_" in spk else 0,
+                    "speaker": spk,
+                    "start": s,
+                    "end": e,
+                }
+                for s, e, spk in rows
+            ]
+        )
+
+    def test_seg_mid_average_selects_closer_speaker(self):
+        # seg_mid = (start+end)/2. seg (2,4) -> mid=3. A mid=0.5 (dist 2.5),
+        # B mid=4.5 (dist 1.5). Correct picks B. Mutant (/3): mid=2 -> picks A.
+        df = self._df([(0.0, 1.0, "SPEAKER_00"), (4.0, 5.0, "SPEAKER_01")])
+        result: TranscriptionResult = {
+            "segments": [{"start": 2.0, "end": 4.0, "text": "x"}],
+            "language": "en",
+        }
+        out = assign_word_speakers(df, result, fill_nearest=True)
+        # Correct mid=3.0: B at 4.5 (dist 1.5) beats A at 0.5 (dist 2.5).
+        assert out["segments"][0]["speaker"] == "SPEAKER_01"
+
+    def test_seg_mid_subtraction_mutant_killer(self):
+        # mutmut_65: (start - end) / 2. seg (2,4): correct mid=3, mutant mid=-1.
+        # A at 0.5 (correct dist 2.5, mutant dist 1.5), B at 4.5 (correct 1.5,
+        # mutant 5.5). Correct picks B; mutant picks A.
+        df = self._df([(0.0, 1.0, "SPEAKER_00"), (4.0, 5.0, "SPEAKER_01")])
+        result: TranscriptionResult = {
+            "segments": [{"start": 2.0, "end": 4.0, "text": "x"}],
+            "language": "en",
+        }
+        out = assign_word_speakers(df, result, fill_nearest=True)
+        assert out["segments"][0]["speaker"] == "SPEAKER_01"
+
+    def test_seg_mid_multiply_mutant_killer(self):
+        # mutmut_64: (start + end) * 2. seg (1,3): correct mid=2, mutant mid=8.
+        # A at 0.5, B at 3.5. Correct: A dist 1.5, B dist 1.5 -> tie (A first).
+        # Mutant: A dist 7.5, B dist 4.5 -> B.
+        df = self._df([(0.0, 1.0, "SPEAKER_00"), (3.0, 4.0, "SPEAKER_01")])
+        result: TranscriptionResult = {
+            "segments": [{"start": 1.0, "end": 3.0, "text": "x"}],
+            "language": "en",
+        }
+        out = assign_word_speakers(df, result, fill_nearest=True)
+        # With a tie, argmin returns the first (SPEAKER_00). Mutant (*2) flips
+        # to SPEAKER_01.
+        assert out["segments"][0]["speaker"] == "SPEAKER_00"
+
+    def test_word_mid_average_selects_closer_speaker(self):
+        # mutmut_118/119/120: word_mid math. Word (2,4): correct mid=3.
+        # A mid=0.5 (dist 2.5), B mid=4.5 (dist 1.5). Correct picks B.
+        df = self._df([(0.0, 1.0, "SPEAKER_00"), (4.0, 5.0, "SPEAKER_01")])
+        result: AlignedTranscriptionResult = {
+            "segments": [
+                {
+                    "start": 2.0,
+                    "end": 4.0,
+                    "text": "x",
+                    "words": [{"word": "x", "start": 2.0, "end": 4.0, "score": 1.0}],
+                    "chars": None,
+                }
+            ],
+            "word_segments": [],
+        }
+        out = assign_word_speakers(df, result, fill_nearest=True)
+        aligned: AlignedTranscriptionResult = out  # pyrefly: ignore[bad-assignment]
+        assert aligned["segments"][0]["words"][0]["speaker"] == "SPEAKER_01"
+
+    def test_word_mid_subtraction_mutant_killer(self):
+        # mutmut_119: (start - end) / 2. Word (2,4): correct mid=3, mutant -1.
+        df = self._df([(0.0, 1.0, "SPEAKER_00"), (4.0, 5.0, "SPEAKER_01")])
+        result: AlignedTranscriptionResult = {
+            "segments": [
+                {
+                    "start": 2.0,
+                    "end": 4.0,
+                    "text": "x",
+                    "words": [{"word": "x", "start": 2.0, "end": 4.0, "score": 1.0}],
+                    "chars": None,
+                }
+            ],
+            "word_segments": [],
+        }
+        out = assign_word_speakers(df, result, fill_nearest=True)
+        aligned: AlignedTranscriptionResult = out  # pyrefly: ignore[bad-assignment]
+        # Correct mid=3 picks B; mutant mid=-1 picks A.
+        assert aligned["segments"][0]["words"][0]["speaker"] == "SPEAKER_01"
+
+    def test_word_mid_multiply_mutant_killer(self):
+        # mutmut_118: (start + end) * 2. Word (1,3): correct mid=2, mutant 8.
+        df = self._df([(0.0, 1.0, "SPEAKER_00"), (3.0, 4.0, "SPEAKER_01")])
+        result: AlignedTranscriptionResult = {
+            "segments": [
+                {
+                    "start": 1.0,
+                    "end": 3.0,
+                    "text": "x",
+                    "words": [{"word": "x", "start": 1.0, "end": 3.0, "score": 1.0}],
+                    "chars": None,
+                }
+            ],
+            "word_segments": [],
+        }
+        out = assign_word_speakers(df, result, fill_nearest=True)
+        aligned: AlignedTranscriptionResult = out  # pyrefly: ignore[bad-assignment]
+        # Tie at mid=2 (A dist 1.5, B dist 1.5) -> first (A). Mutant mid=8 -> B.
+        assert aligned["segments"][0]["words"][0]["speaker"] == "SPEAKER_00"
+
+
+class TestAssignWordSpeakersBreakKillers:
+    """Kill continue->break mutant (mutmut_83) in the word loop.
+
+    mutmut_83: continue -> break. When a word has no "start", correct skips
+    it (continue) and processes subsequent words. Mutant stops the whole
+    word loop (break), leaving later words unassigned.
+    """
+
+    def _df(self, rows):
+        return pd.DataFrame(
+            [
+                {
+                    "segment": Segment(s, e, spk),
+                    "label": int(spk.split("_")[1]) if spk and "_" in spk else 0,
+                    "speaker": spk,
+                    "start": s,
+                    "end": e,
+                }
+                for s, e, spk in rows
+            ]
+        )
+
+    def test_word_without_start_does_not_stop_loop(self):
+        # First word has no "start" (continue), second word has start and
+        # should be assigned. Mutant (break): second word unassigned.
+        df = self._df([(0.0, 1.0, "SPEAKER_00")])
+        result: AlignedTranscriptionResult = {
+            "segments": [
+                {
+                    "start": 0.0,
+                    "end": 1.0,
+                    "text": "x y",
+                    "words": [
+                        {"word": "x", "score": 1.0},  # pyrefly: ignore[bad-typed-dict-key]
+                        {"word": "y", "start": 0.0, "end": 1.0, "score": 1.0},
+                    ],
+                    "chars": None,
+                }
+            ],
+            "word_segments": [],
+        }
+        out = assign_word_speakers(df, result)
+        aligned: AlignedTranscriptionResult = out  # pyrefly: ignore[bad-assignment]
+        words = aligned["segments"][0]["words"]
+        # Correct: second word assigned. Mutant (break): not assigned.
+        assert words[1].get("speaker") == "SPEAKER_00"
